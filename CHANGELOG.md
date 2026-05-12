@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Headings and Landmarks now show complete inventories** (like the user's existing bookmarklets). Headings includes hidden ones (`display:none`, `visibility:hidden`, `aria-hidden="true"`, `opacity:0`) with a "HIDDEN · reason" tag, and visually-hidden sr-only headings with an "sr-only" tag — hidden headings don't get page badges and don't trigger multi-h1 / skipped-level issues (those affect visible navigation), but they're in the list so auditors can spot stale or AT-only headings. Landmarks now lists non-qualifying candidates (e.g. `<header>` inside `<article>`, `<section>` without a name) in the main panel with a "not landmark" chip and the reason — previously these were hidden in a collapsible section. Both panels gain a filter bar (All / Visible / Hidden / Issues for headings; All / Landmarks / Non-landmarks / Issues for landmarks).
 - **Headings check.** Reports every `<h1>` … `<h6>` and `[role="heading"]` element with its level, document-order number, text content, and selector. Indented tree view in the panel; coloured "H{level}" chips per row. Flags:
   - Empty headings (no text content).
   - Skipped levels (e.g. `<h2>` followed by `<h4>`).
@@ -27,6 +28,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **MISSING** — no alt attribute and no aria-* labeling (screen readers may announce the src URL)
   - **suspicious** — alt is present but the text looks wrong: filename pattern (`.jpg`, `IMG_1234`), generic single word ("image", "photo", "logo"), or redundant prefix ("image of …")
   - Panel shows each image's raw `alt` attribute alongside its computed accessible name and a truncated `src`/`href`, so auditors can verify whether the alt actually describes what the image conveys.
+- **Title & Language check.** Combines three WCAG criteria into one page-level inspector:
+  - **WCAG 2.4.2 (Page Titled).** `<title>` presence, non-empty, not generic ("Untitled", "Document", "New Page"), not matching the URL/hostname, exactly one `<title>` in `<head>`.
+  - **WCAG 3.1.1 (Language of Page).** `<html lang>` presence + BCP 47 structural validation + RFC 5646 case canonicalization (language lowercase, script TitleCase, region UPPERCASE, variants lowercase) + value lookup against ISO 639 (curated 200+ language subtags), ISO 3166-1 alpha-2 (full registered region set), UN M.49 numeric regions, and ISO 15924 scripts. Region validation matters because the region subtag drives screen-reader dialect/voice selection — an unregistered region means the user gets the wrong pronunciation model.
+  - **`<html xml:lang>`** validated identically; mismatch between `<html lang>` and `<html xml:lang>` flagged as an error (RFC 5646 says they must be equivalent).
+  - **Every other `lang` and `xml:lang` attribute on the page** — full inventory, not just problematic ones. Same validation rules. Cross-check on same element: `lang="en"` with `xml:lang="fr"` flagged.
+  - **`hreflang` on links** validated as BCP 47.
+  - **WCAG 3.1.2 (Language of Parts) — heuristic.** `<a href>` URLs whose path or query string suggests a different language than the page (`/fr/page.html`, `?lang=de`) and which lack a matching `hreflang` are flagged for manual review.
+  - **Embedded-language smell.** Text attributes (`alt`, `aria-label`, `title`, `aria-roledescription`, `aria-description`, `placeholder`) that contain a literal `lang=` substring or HTML markup — flagged because attribute values are plain text and any embedded markup is ignored by assistive tech.
+  - Panel filter bar: All / Issues / Title / Page lang / Lang attrs / hreflang / Foreign URLs / Embedded.
+- **Colour Contrast check.** Tests text colour against background per WCAG 1.4.3 AA (4.5:1 normal text, 3:1 large text) and also reports AAA status (7:1 / 4.5:1). Mirrors the rule set from CNIB-AccessLabs/auto_a11y. Per-element status:
+  - **pass** — meets WCAG AA, no caveats
+  - **pass-warn** — meets the calculated ratio but one or more caveats apply (gradient bg, image bg, animation, overflow) — manual review recommended
+  - **fail-aa** — contrast inside container fails AA
+  - **partial-fail** — fails inside AND text overflows the container, so the overflowing portion can't be tested
+  - **cannot-calculate** — gradient/image/transparent/z-index stacking makes automated calculation unreliable; flagged for manual review
+  - Background resolution walks up the DOM compositing semi-transparent layers via Porter-Duff source-over. Stops at the first opaque ancestor, at a z-index stacking context, or at root (defaulting to white).
+  - Skipped: visually-hidden (sr-only) text, `display:none` / `visibility:hidden` / `opacity:0` descendants, empty/whitespace-only text nodes, elements where text colour equals background (data error).
+  - Large text detection: ≥24px normal OR ≥18.66px bold (font-weight ≥ 700).
+  - Filter bar in panel: All / Fail / Warn / Cannot-calc / Pass.
+  - **Known limitations vs auto_a11y**, surfaced inside the panel: tested only at the user's current viewport (auto_a11y resizes to every CSS-declared media-query breakpoint); pseudoclass states (`:hover`, `:focus`, `:visited`, `:active`, `:link`) are not separately evaluated; `prefers-contrast` media queries not handled.
 - **ARIA Validation check.** Lists every element on the page that uses `role` or any `aria-*` attribute, with a status chip (ok / redundant / issues) plus the element's complete ARIA attribute inventory. The panel header has a filter bar — All / Issues / Redundant — so you can either survey the developer's overall approach (is ARIA being used too much, too little, or duplicated?) or focus only on actionable bugs. Each ARIA-using element also gets a coloured outline on the page (red for issues, amber for redundant-only, light gray dotted for valid usage) so the page itself shows the ARIA footprint. Issue categories:
   - **unknown-role** — role value not in ARIA 1.2's concrete role list, with Levenshtein-based "did you mean" suggestion
   - **abstract-role** — role is one of ARIA's abstract roles (e.g. `widget`, `composite`), which must not be used by authors

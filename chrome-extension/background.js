@@ -25,7 +25,9 @@ const CHECKS = {
   landmarks: { label: "Landmarks",        scan: scanLandmarks, display: displayLandmarks },
   images:    { label: "Images",           scan: scanImages,    display: displayImages    },
   links:     { label: "Link Text",        scan: scanLinks,     display: displayLinks     },
-  aria:      { label: "ARIA Validation",  scan: scanAria,      display: displayAria      }
+  aria:      { label: "ARIA Validation",  scan: scanAria,      display: displayAria      },
+  contrast:  { label: "Colour Contrast",  scan: scanContrast,  display: displayContrast  },
+  document:  { label: "Title & Language", scan: scanDocument,  display: displayDocument  }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -55,14 +57,23 @@ async function runCheck(tabId, checkId) {
     target: { tabId, allFrames: true },
     func: check.scan
   });
-  const aggregated = injection.map(i => ({
-    frameId: i.frameId,
-    url: (i.result && i.result.url) || "",
-    isTop: !!(i.result && i.result.isTop),
-    results: (i.result && i.result.results) || [],
-    shadowRoots: (i.result && i.result.shadowRoots) || 0,
-    error: i.result && i.result.error
-  }));
+  // Spread the entire frame result into the aggregated entry so checks
+  // that return non-standard shapes (e.g. Title & Language returns title,
+  // htmlLang, htmlXmlLang, langAttrs, hreflangLinks, foreignUrls,
+  // embeddedLangs — none of which match the "results array" convention)
+  // get all their fields through to displayXxx. Safety defaults are still
+  // applied for the conventional fields the orchestrator depends on.
+  const aggregated = injection.map(i => {
+    const r = i.result || {};
+    return Object.assign({}, r, {
+      frameId: i.frameId,
+      url: r.url || "",
+      isTop: !!r.isTop,
+      results: r.results || [],
+      shadowRoots: r.shadowRoots || 0,
+      error: r.error
+    });
+  });
   // Render in the top frame.
   await api.scripting.executeScript({
     target: { tabId, frameIds: [0] },
@@ -645,6 +656,32 @@ function scanHeadings() {
     var seenEls = new Set();
     var shadowRoots = 0;
 
+    function isVisuallyHidden(el) {
+      try {
+        var s = window.getComputedStyle(el);
+        if (!s) return false;
+        if (s.position === "absolute" || s.position === "fixed") {
+          if (s.clip === "rect(1px, 1px, 1px, 1px)" || s.clip === "rect(0px, 0px, 0px, 0px)" ||
+              s.clip === "rect(0, 0, 0, 0)") return true;
+          if (s.width === "1px" && s.height === "1px" && s.overflow === "hidden") return true;
+          if (s.clipPath && s.clipPath.indexOf("inset(50%)") !== -1) return true;
+        }
+        return false;
+      } catch (e) { return false; }
+    }
+
+    function hiddenReason(el) {
+      try {
+        if (el.getAttribute("aria-hidden") === "true") return "aria-hidden";
+        var s = window.getComputedStyle(el);
+        if (!s) return null;
+        if (s.display === "none") return "display:none";
+        if (s.visibility === "hidden") return "visibility:hidden";
+        if (parseFloat(s.opacity) === 0) return "opacity:0";
+        return null;
+      } catch (e) { return null; }
+    }
+
     function walk(root) {
       var matches;
       try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
@@ -653,7 +690,12 @@ function scanHeadings() {
         seenEls.add(el);
         var r;
         try { r = el.getBoundingClientRect(); } catch (e) { return; }
-        if (isHidden(el)) return;
+        // Capture visibility state instead of filtering — show all discovered
+        // headings, mark hidden ones so the auditor sees the full inventory
+        // (which often reveals sr-only nav headings, leftover hidden h1s, etc.)
+        var hidden = isHidden(el);
+        var hReason = hidden ? hiddenReason(el) : null;
+        var visuallyHidden = !hidden && isVisuallyHidden(el);
 
         var tag = el.tagName.toLowerCase();
         var isNative = /^h[1-6]$/.test(tag);
@@ -681,6 +723,9 @@ function scanHeadings() {
           levelSource: levelSource,
           text: text,
           empty: !text,
+          hidden: hidden,
+          hiddenReason: hReason,
+          visuallyHidden: visuallyHidden,
           selector: uniqueSelector(el),
           rect: { top: r.top, left: r.left, width: r.width, height: r.height }
         });
@@ -748,6 +793,9 @@ function displayHeadings(framesData, checkId) {
         levelSource: r.levelSource,
         text: r.text,
         empty: r.empty,
+        hidden: r.hidden,
+        hiddenReason: r.hiddenReason,
+        visuallyHidden: r.visuallyHidden,
         selector: r.selector,
         frameUrl: frame.url,
         frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
@@ -763,14 +811,21 @@ function displayHeadings(framesData, checkId) {
   // Number in document order across frames (1-based).
   allResults.forEach(function (r, i) { r.index = i + 1; });
 
-  // Issue analysis. Issues that involve OTHER elements (multiple h1, skipped
-  // level) carry their related element indices so the panel and Markdown
-  // output can reference all the involved elements, not just the current one.
-  var h1Indices = allResults.filter(function (r) { return r.level === 1; }).map(function (r) { return r.index; });
+  // Issue analysis. Hidden headings (display:none, visibility:hidden,
+  // aria-hidden, opacity:0) are EXCLUDED from issue calculations — they
+  // don't affect document outline navigation, so flagging "multiple h1"
+  // because one of them is hidden would be misleading. They're still
+  // listed in the panel with a "hidden" indicator so the auditor can see
+  // them, but they're treated as not contributing to the visible structure.
+  var visibleResults = allResults.filter(function (r) { return !r.hidden; });
+  var h1Indices = visibleResults.filter(function (r) { return r.level === 1; }).map(function (r) { return r.index; });
+  var h1Count = h1Indices.length;
+  var hiddenCount = allResults.filter(function (r) { return r.hidden; }).length;
   var prevValidLevel = 0;
   var prevValidIndex = null;
   allResults.forEach(function (r) {
     r.issues = [];
+    if (r.hidden) return; // hidden headings don't get issues — they're inventory-only
     if (r.empty) r.issues.push({ text: "empty heading", related: [] });
     if (!r.isNative && r.level === null) r.issues.push({ text: 'role="heading" with no aria-level', related: [] });
     if (r.level !== null && (r.level < 1 || r.level > 6)) {
@@ -809,7 +864,9 @@ function displayHeadings(framesData, checkId) {
     return mdEsc(issue.text) + " (also: " + refs.join(", ") + ")";
   }
 
-  // Resolve element references for outline + click-to-scroll
+  // Resolve element references for outline + click-to-scroll. Hidden headings
+  // get no outline (there's nothing to outline) but the panel row still links
+  // back to the element for inspection in DevTools.
   allResults.forEach(function (r) {
     var doc;
     if (r.isTop) doc = document;
@@ -819,10 +876,12 @@ function displayHeadings(framesData, checkId) {
       var el = doc.querySelector(r.selector);
       if (el) {
         r._resolveEl = el;
-        var color = r.issues.length ? "#b00020" : "#003876";
-        var style = r.issues.length ? "dashed" : "solid";
-        el.style.setProperty("outline", "2px " + style + " " + color, "important");
-        el.style.setProperty("outline-offset", "1px", "important");
+        if (!r.hidden) {
+          var color = r.issues.length ? "#b00020" : "#003876";
+          var style = r.issues.length ? "dashed" : "solid";
+          el.style.setProperty("outline", "2px " + style + " " + color, "important");
+          el.style.setProperty("outline-offset", "1px", "important");
+        }
       }
     } catch (e) {}
   });
@@ -850,6 +909,10 @@ function displayHeadings(framesData, checkId) {
     ".panel .btns{display:flex;gap:8px;}" +
     ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
     ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;flex-wrap:wrap;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:13px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
     ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
     ".panel .summary .issue{color:#b00020;font-weight:600 !important;}" +
     ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
@@ -858,14 +921,23 @@ function displayHeadings(framesData, checkId) {
     ".panel li{padding:8px 14px 8px 0;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;display:flex;align-items:flex-start;gap:10px;}" +
     ".panel li:hover{background:#eef4ff;}" +
     ".panel li.frame-tag{border-left:3px solid #0a5d2e;}" +
+    ".panel li.has-issues{border-left:3px solid #b00020;}" +
+    ".panel li.is-hidden{opacity:0.6;background:#fafafa;}" +
+    ".panel li.is-hidden .text{font-style:italic;}" +
+    ".panel.filter-issues li:not(.has-issues){display:none;}" +
+    ".panel.filter-visible li.is-hidden{display:none;}" +
+    ".panel.filter-hidden li:not(.is-hidden){display:none;}" +
     ".panel li .gutter{flex:0 0 auto;width:14px;color:#999;font-size:14px;text-align:right;}" +
     ".panel li .levelchip{flex:0 0 auto;display:inline-block;min-width:40px;text-align:center;padding:3px 8px;border-radius:3px;background:#003876;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;}" +
     ".panel li .levelchip.aria{background:#0a5d2e;}" +
     ".panel li .levelchip.unknown{background:#b45309;}" +
     ".panel li .levelchip.outofrange{background:#b00020;}" +
+    ".panel li .levelchip.hidden{background:#888;}" +
     ".panel li .body{flex:1 1 auto;min-width:0;}" +
     ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;}" +
     ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .hidden-tag{display:inline-block;background:#666;color:#fff !important;padding:1px 6px;border-radius:2px;font-size:11px;font-weight:600 !important;text-transform:uppercase;margin-left:6px;letter-spacing:0.5px;}" +
+    ".panel li .sr-only-tag{background:#0a5d2e;}" +
     ".panel li .text{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
     ".panel li .text.empty{color:#b00020;font-style:italic;font-weight:600 !important;}" +
     ".panel li .issues{color:#b00020;font-size:14px;margin-top:3px;font-weight:600 !important;}" +
@@ -876,10 +948,13 @@ function displayHeadings(framesData, checkId) {
   styleEl.textContent = css;
   shadow.appendChild(styleEl);
 
-  // Badges
+  // Badges. Skip hidden headings (no visible box to badge over) but they
+  // still appear in the panel list with a "HIDDEN" tag so the auditor can
+  // see them — useful for finding stale or sr-only headings.
   var badges = [];
   allResults.forEach(function (r) {
     if (!r.positioned) return;
+    if (r.hidden) return; // no badge for hidden headings
     var badge = document.createElement("div");
     var cls = "badge";
     if (r.issues.length) cls += " issue";
@@ -931,18 +1006,20 @@ function displayHeadings(framesData, checkId) {
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
 
   var panelEl = document.createElement("div");
-  panelEl.className = "panel";
+  panelEl.className = "panel filter-all";
 
   var summary = "";
   if (allResults.length === 0) {
     summary += '<span class="warn">No headings found.</span>';
   } else if (issueCount === 0) {
-    summary += '<span class="ok">All ' + allResults.length + ' heading' + (allResults.length === 1 ? "" : "s") + ' look structurally valid.</span>';
+    summary += '<span class="ok">All ' + visibleResults.length + ' visible heading' + (visibleResults.length === 1 ? "" : "s") + ' look structurally valid.</span>';
   } else {
-    summary += '<span class="issue">' + issueCount + " of " + allResults.length + " heading" + (allResults.length === 1 ? "" : "s") + " have issues.</span>";
+    summary += '<span class="issue">' + issueCount + " of " + visibleResults.length + " visible heading" + (visibleResults.length === 1 ? "" : "s") + " have issues.</span>";
   }
   summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
-  summary += h1Count + ' h1' + (h1Count === 1 ? "" : "s") + " · top doc";
+  summary += h1Count + ' h1' + (h1Count === 1 ? "" : "s") + " · " + visibleResults.length + " visible";
+  if (hiddenCount) summary += " · " + hiddenCount + " hidden";
+  summary += " · top doc";
   if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
   if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
   summary += '</div>';
@@ -950,6 +1027,12 @@ function displayHeadings(framesData, checkId) {
   panelEl.innerHTML =
     "<header><strong>Headings (" + allResults.length + ")</strong>" +
     '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+      '<button data-filter="visible">Visible only (' + visibleResults.length + ')</button>' +
+      '<button data-filter="hidden">Hidden only (' + hiddenCount + ')</button>' +
+      '<button data-filter="issues">Issues (' + issueCount + ')</button>' +
+    '</div>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -957,13 +1040,16 @@ function displayHeadings(framesData, checkId) {
   allResults.forEach(function (r) {
     var li = document.createElement("li");
     if (!r.isTop) li.classList.add("frame-tag");
+    if (r.issues.length) li.classList.add("has-issues");
+    if (r.hidden) li.classList.add("is-hidden");
 
     // Indent gutter based on level (use 18px per level; cap at level 6)
     var indentLevel = (r.level !== null && r.level >= 1 && r.level <= 6) ? r.level - 1 : 0;
     li.style.paddingLeft = (10 + indentLevel * 18) + "px";
 
     var chipClass = "levelchip";
-    if (r.level === null) chipClass += " unknown";
+    if (r.hidden) chipClass += " hidden";
+    else if (r.level === null) chipClass += " unknown";
     else if (r.level < 1 || r.level > 6) chipClass += " outofrange";
     else if (r.levelSource === "aria-level") chipClass += " aria";
     var chipText = r.level !== null ? "H" + r.level : "H?";
@@ -974,11 +1060,15 @@ function displayHeadings(framesData, checkId) {
     else if (r.level === null) levelExplain = ' <span style="color:#b45309">(no aria-level)</span>';
     else if (r.level < 1 || r.level > 6) levelExplain = ' <span style="color:#b00020">(out of range)</span>';
 
+    var hiddenTag = "";
+    if (r.hidden) hiddenTag = ' <span class="hidden-tag">hidden · ' + esc(r.hiddenReason || "?") + '</span>';
+    else if (r.visuallyHidden) hiddenTag = ' <span class="hidden-tag sr-only-tag">sr-only</span>';
+
     li.innerHTML =
       '<span class="gutter">' + r.index + "</span>" +
       '<span class="' + chipClass + '">' + esc(chipText) + "</span>" +
       '<div class="body">' +
-        '<div class="meta">' + location + "<code>" + esc(r.tag) + "</code>" + levelExplain + "</div>" +
+        '<div class="meta">' + location + "<code>" + esc(r.tag) + "</code>" + levelExplain + hiddenTag + "</div>" +
         '<div class="text' + (r.empty ? " empty" : "") + '">' + (r.empty ? "(empty heading)" : esc(r.text)) + "</div>" +
         (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.map(fmtIssuePanel).join("; ")) + "</div>" : "") +
         '<div class="src">' + esc(r.selector) + "</div>" +
@@ -1002,6 +1092,17 @@ function displayHeadings(framesData, checkId) {
     list.appendChild(li);
   });
   shadow.appendChild(panelEl);
+
+  // Wire the filter bar (All / Visible only / Hidden only / Issues)
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
 
   // Make the panel draggable by its header. The user can move it off any
   // element they want to inspect. Buttons inside the header still receive
@@ -1225,7 +1326,6 @@ function scanLandmarks() {
     var results = [];
     var seenEls = new Set();
     var shadowRoots = 0;
-    var skipped = [];
 
     function walk(root) {
       var matches;
@@ -1238,19 +1338,31 @@ function scanLandmarks() {
         try { r = el.getBoundingClientRect(); } catch (e) { return; }
         var accname = landmarkAccName(el);
         var role = effectiveRole(el, accname);
+        // Push EVERY landmark candidate to results, including those that
+        // don't qualify (e.g. <header> inside <article>, <section> without
+        // a name). Non-landmarks are tagged isLandmark:false with a
+        // human-readable reason — the panel renders them in the main list
+        // so the auditor sees the complete inventory of candidates, not
+        // just the ones that became landmarks.
         if (role.role === null) {
-          if (role.note) {
-            skipped.push({
-              tag: el.tagName.toLowerCase(),
-              note: role.note,
-              selector: uniqueSelector(el)
-            });
-          }
+          results.push({
+            tag: el.tagName.toLowerCase(),
+            role: null,
+            roleExplicit: false,
+            isLandmark: false,
+            notLandmarkReason: role.note || "no implicit role",
+            name: accname.name,
+            nameSrc: accname.src,
+            selector: uniqueSelector(el),
+            rect: { top: r.top, left: r.left, width: r.width, height: r.height }
+          });
           return;
         }
         results.push({
           tag: el.tagName.toLowerCase(),
           role: role.role,
+          isLandmark: true,
+          notLandmarkReason: null,
           roleExplicit: role.explicit,
           name: accname.name,
           nameSrc: accname.src,
@@ -1277,8 +1389,7 @@ function scanLandmarks() {
       url: window.location.href,
       isTop: window === window.top,
       results: results,
-      shadowRoots: shadowRoots,
-      skipped: skipped
+      shadowRoots: shadowRoots
     };
   } catch (e) {
     return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
@@ -1304,6 +1415,9 @@ function displayLandmarks(framesData, checkId) {
   });
 
   var allResults = [];
+  // Non-landmarks are now part of allResults (marked isLandmark:false).
+  // We still compute a count for the summary line. (Older variable name kept
+  // so the rest of the rendering code didn't need wholesale changes.)
   var allSkipped = [];
   var unmatchedFrames = 0;
   var frameLabelByUrl = new Map();
@@ -1322,6 +1436,8 @@ function displayLandmarks(framesData, checkId) {
     (frame.results || []).forEach(function (r) {
       allResults.push({
         tag: r.tag, role: r.role, roleExplicit: r.roleExplicit,
+        isLandmark: r.isLandmark !== false, // default true if undefined (legacy)
+        notLandmarkReason: r.notLandmarkReason || null,
         name: r.name, nameSrc: r.nameSrc,
         selector: r.selector,
         frameUrl: frame.url,
@@ -1334,21 +1450,26 @@ function displayLandmarks(framesData, checkId) {
         _resolveEl: null
       });
     });
-    (frame.skipped || []).forEach(function (s) { allSkipped.push(s); });
   });
   allResults.forEach(function (r, i) { r.index = i + 1; });
 
+  // Populate the count of non-landmark candidates for the summary line.
+  allSkipped = allResults.filter(function (r) { return !r.isLandmark; });
+
   // Issues. Issues that involve other elements carry their related indices so
   // the panel and Markdown output can reference every involved element, not
-  // just the current one.
+  // just the current one. Non-landmarks are excluded — they don't have a
+  // role and so can't have role-related issues.
   var byRole = {};
   allResults.forEach(function (r) {
+    if (!r.isLandmark) return;
     if (!byRole[r.role]) byRole[r.role] = [];
     byRole[r.role].push(r);
   });
 
   allResults.forEach(function (r) {
     r.issues = [];
+    if (!r.isLandmark) return; // non-landmarks: no role-related issues
     if (r.role === "main" && byRole["main"].length > 1) {
       r.issues.push({
         text: "multiple main landmarks on page (only one expected)",
@@ -1446,6 +1567,10 @@ function displayLandmarks(framesData, checkId) {
     ".panel .btns{display:flex;gap:8px;}" +
     ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
     ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;flex-wrap:wrap;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:13px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
     ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
     ".panel .summary .issue{color:#b00020;font-weight:600 !important;}" +
     ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
@@ -1453,28 +1578,36 @@ function displayLandmarks(framesData, checkId) {
     ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
     ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;display:flex;align-items:flex-start;gap:10px;}" +
     ".panel li:hover{background:#eef4ff;}" +
+    ".panel li.has-issues{border-left:3px solid #b00020;}" +
+    ".panel li.not-landmark{background:#fafafa;opacity:0.85;}" +
+    ".panel.filter-landmarks li.not-landmark{display:none;}" +
+    ".panel.filter-non-landmarks li:not(.not-landmark){display:none;}" +
+    ".panel.filter-issues li:not(.has-issues){display:none;}" +
     ".panel li .gutter{flex:0 0 auto;width:18px;color:#999;font-size:14px;text-align:right;}" +
     ".panel li .rolechip{flex:0 0 auto;display:inline-block;min-width:100px;text-align:center;padding:4px 10px;border-radius:3px;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;}" +
+    ".panel li .rolechip.not-landmark{background:#999;}" +
     ".panel li .body{flex:1 1 auto;min-width:0;}" +
     ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;}" +
     ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
     ".panel li .name{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
     ".panel li .name.unnamed{color:#666;font-style:italic;font-weight:400 !important;}" +
+    ".panel li .reason{margin-top:4px;font-size:14px;color:#7a4a09;font-style:italic;}" +
     ".panel li .issues{color:#b00020;font-size:14px;margin-top:4px;font-weight:600 !important;}" +
     ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:2px;word-break:break-all;}" +
-    ".panel .skipped{padding:10px 14px;border-top:1px solid #eee;background:#fafafa;font-size:14px;color:#555;}" +
-    ".panel .skipped summary{cursor:pointer;font-weight:600 !important;}" +
-    ".panel .skipped ul{margin:6px 0 0 0;padding-left:18px;}" +
     ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
 
   var styleEl = document.createElement("style");
   styleEl.textContent = css;
   shadow.appendChild(styleEl);
 
-  // Badges
+  // Badges. Only qualifying landmarks get badges on the page — non-landmark
+  // candidates (e.g. <section> without a name) are visible in the panel but
+  // we don't tag them on the page because they're not part of the AT-visible
+  // structure.
   var badges = [];
   allResults.forEach(function (r) {
     if (!r.positioned) return;
+    if (!r.isLandmark) return;
     var badge = document.createElement("div");
     var cls = "badge";
     if (r.issues.length) cls += " issue";
@@ -1497,11 +1630,15 @@ function displayLandmarks(framesData, checkId) {
   var md = "| # | Frame | Role | Tag | Accessible Name | Source | Issues | Selector |\n";
   md += "|---|-------|------|-----|-----------------|--------|--------|----------|\n";
   allResults.forEach(function (r) {
-    var roleStr = r.role + (r.roleExplicit ? " (explicit)" : "");
-    var name = r.name ? mdEsc(r.name) : "*(no name)*";
-    var issues = r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "";
+    var roleStr = r.isLandmark
+      ? (r.role + (r.roleExplicit ? " (explicit)" : ""))
+      : "*(not a landmark)*";
+    var name = r.name ? mdEsc(r.name) : (r.isLandmark ? "*(no name)*" : "");
+    var notes = r.isLandmark
+      ? (r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "")
+      : mdEsc(r.notLandmarkReason || "");
     var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
-    md += "| " + r.index + " | " + frameLabel + " | " + roleStr + " | `" + r.tag + "` | " + name + " | " + (r.nameSrc || "") + " | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
+    md += "| " + r.index + " | " + frameLabel + " | " + roleStr + " | `" + r.tag + "` | " + name + " | " + (r.nameSrc || "") + " | " + notes + " | `" + mdEsc(r.selector) + "` |\n";
   });
 
   var issueCount = allResults.filter(function (r) { return r.issues.length; }).length;
@@ -1529,16 +1666,19 @@ function displayLandmarks(framesData, checkId) {
 
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
 
+  var landmarkCount = allResults.filter(function (r) { return r.isLandmark; }).length;
+  var nonLandmarkCount = allSkipped.length;
+
   var panelEl = document.createElement("div");
-  panelEl.className = "panel";
+  panelEl.className = "panel filter-all";
 
   var summary = "";
   if (allResults.length === 0) {
-    summary += '<span class="warn">No landmarks found on this page.</span>';
+    summary += '<span class="warn">No landmarks or landmark candidates found on this page.</span>';
   } else if (issueCount === 0) {
-    summary += '<span class="ok">All ' + allResults.length + ' landmark' + (allResults.length === 1 ? "" : "s") + ' look structurally valid.</span>';
+    summary += '<span class="ok">All ' + landmarkCount + ' landmark' + (landmarkCount === 1 ? "" : "s") + ' look structurally valid.</span>';
   } else {
-    summary += '<span class="issue">' + issueCount + " of " + allResults.length + " landmark" + (allResults.length === 1 ? "" : "s") + " have issues.</span>";
+    summary += '<span class="issue">' + issueCount + " of " + landmarkCount + " landmark" + (landmarkCount === 1 ? "" : "s") + " have issues.</span>";
   }
   // Role inventory
   var roleSummary = Object.keys(byRole).sort().map(function (role) {
@@ -1550,37 +1690,52 @@ function displayLandmarks(framesData, checkId) {
   summary += "top doc";
   if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
   if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
-  if (allSkipped.length) summary += " · " + allSkipped.length + " non-landmark candidate(s)";
+  if (nonLandmarkCount) summary += " · " + nonLandmarkCount + " non-landmark candidate(s)";
   summary += '</div>';
 
   panelEl.innerHTML =
     "<header><strong>Landmarks (" + allResults.length + ")</strong>" +
     '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+      '<button data-filter="landmarks">Landmarks (' + landmarkCount + ')</button>' +
+      '<button data-filter="non-landmarks">Non-landmarks (' + nonLandmarkCount + ')</button>' +
+      '<button data-filter="issues">Issues (' + issueCount + ')</button>' +
+    '</div>' +
     '<div class="summary">' + summary + "</div>" +
-    '<ol id="' + P + 'list"></ol>' +
-    (allSkipped.length
-      ? '<details class="skipped"><summary>Non-landmark candidates (' + allSkipped.length + ')</summary><ul>' +
-          allSkipped.map(function (s) {
-            return "<li><code>&lt;" + esc(s.tag) + "&gt;</code> — " + esc(s.note) + " <span style=\"color:#999\">(" + esc(s.selector) + ")</span></li>";
-          }).join("") +
-        '</ul></details>'
-      : "");
+    '<ol id="' + P + 'list"></ol>';
 
   var list = panelEl.querySelector("#" + P + "list");
   allResults.forEach(function (r) {
     var li = document.createElement("li");
-    var chipColor = ROLE_COLORS[r.role] || "#003876";
+    if (r.issues.length) li.classList.add("has-issues");
+    if (!r.isLandmark) li.classList.add("not-landmark");
+
+    var chipColor = r.isLandmark ? (ROLE_COLORS[r.role] || "#003876") : "#999";
+    var chipText = r.isLandmark ? r.role : "not landmark";
+    var chipClass = "rolechip" + (r.isLandmark ? "" : " not-landmark");
     var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
-    var explicitNote = r.roleExplicit ? ' <span style="color:#555">(role="' + esc(r.role) + '")</span>' : "";
-    li.innerHTML =
-      '<span class="gutter">' + r.index + "</span>" +
-      '<span class="rolechip" style="background:' + chipColor + '">' + esc(r.role) + "</span>" +
-      '<div class="body">' +
+    var explicitNote = r.isLandmark && r.roleExplicit ? ' <span style="color:#555">(role="' + esc(r.role) + '")</span>' : "";
+
+    var bodyHtml;
+    if (r.isLandmark) {
+      bodyHtml =
         '<div class="meta">' + location + "<code>&lt;" + esc(r.tag) + "&gt;</code>" + explicitNote + (r.nameSrc ? ' <span style="color:#999">· via ' + esc(r.nameSrc) + "</span>" : "") + "</div>" +
         '<div class="name' + (r.name ? "" : " unnamed") + '">' + (r.name ? esc(r.name) : "(no accessible name)") + "</div>" +
         (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.map(fmtIssuePanel).join("; ")) + "</div>" : "") +
-        '<div class="src">' + esc(r.selector) + "</div>" +
-      "</div>";
+        '<div class="src">' + esc(r.selector) + "</div>";
+    } else {
+      bodyHtml =
+        '<div class="meta">' + location + "<code>&lt;" + esc(r.tag) + "&gt;</code></div>" +
+        (r.name ? '<div class="name">' + esc(r.name) + " <span style=\"color:#999;font-size:13px\">(via " + esc(r.nameSrc) + ")</span></div>" : "") +
+        '<div class="reason">' + esc(r.notLandmarkReason) + "</div>" +
+        '<div class="src">' + esc(r.selector) + "</div>";
+    }
+
+    li.innerHTML =
+      '<span class="gutter">' + r.index + "</span>" +
+      '<span class="' + chipClass + '" style="background:' + chipColor + '">' + esc(chipText) + "</span>" +
+      '<div class="body">' + bodyHtml + "</div>";
 
     li.addEventListener("click", function () {
       try {
@@ -1600,6 +1755,17 @@ function displayLandmarks(framesData, checkId) {
     list.appendChild(li);
   });
   shadow.appendChild(panelEl);
+
+  // Wire the filter bar (All / Landmarks / Non-landmarks / Issues)
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
 
   // Make the panel draggable by its header. The user can move it off any
   // element they want to inspect. Buttons inside the header still receive
@@ -3882,6 +4048,2005 @@ function displayAria(framesData, checkId) {
         } catch (e) {}
       }
     });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+}
+
+/* ====================================================================
+ * CHECK: CONTRAST — text colour contrast inspector (WCAG 1.4.3 / 1.4.6)
+ *
+ * Mirrors the rule set from CNIB-AccessLabs/auto_a11y's contrast tests.
+ * Per-element classification:
+ *
+ *   pass             contrast meets WCAG AA (4.5:1 normal text, 3:1 large)
+ *   pass-warn        meets ratio inside container BUT one or more caveats
+ *                    apply that may invalidate the calculation (gradient,
+ *                    image, animation, overflow, z-index combined with
+ *                    something else) — manual review recommended
+ *   fail-aa          contrast inside container fails AA
+ *   partial-fail     fails inside AND text overflows the container, so we
+ *                    only know about the inside portion; overflowing part
+ *                    might be against a different background
+ *   cannot-calculate background is gradient / image / transparent /
+ *                    stops at a z-index stacking context — automated
+ *                    calculation isn't reliable, manual review required
+ *
+ * Each result carries a caveats[] list so the panel and Markdown both
+ * show every reason the calculation might be off.
+ *
+ * Large text: ≥24px normal OR ≥18.66px bold. Bold = font-weight ≥ 700.
+ *
+ * Background resolution walks up the DOM compositing semi-transparent
+ * layers via Porter-Duff "source-over". Stops at:
+ *   - first fully opaque background
+ *   - z-index stacking context (marks the result as needing review)
+ *   - root (defaults missing background to white, like the browser does)
+ *
+ * Text nodes are walked via TreeWalker. Excluded:
+ *   - empty / whitespace-only text
+ *   - display:none, visibility:hidden, opacity:0 (with ancestors)
+ *   - common visually-hidden / sr-only patterns
+ *
+ * AAA mode is computed alongside AA so the panel can surface "passes AA
+ * but fails AAA" as additional info. Default reporting level is AA.
+ *
+ * KNOWN LIMITATIONS vs the auto_a11y reference implementation:
+ *   - Multi-breakpoint testing. auto_a11y resizes the viewport to every
+ *     CSS-declared media-query breakpoint. A live extension can only test
+ *     the user's current viewport. Workaround: resize the browser window
+ *     and re-run the check.
+ *   - Pseudoclass states. auto_a11y parses CSS rules to compute :hover,
+ *     :focus, :visited, :active, :link colour-state contrasts. v1 of this
+ *     check tests only the default state.
+ *   - prefers-contrast media queries are not separately evaluated.
+ *   These are listed in the panel summary so the auditor knows what the
+ *   check did NOT cover.
+ * ==================================================================== */
+
+function scanContrast() {
+  "use strict";
+  try {
+    /* ----- helpers: colour parsing, luminance, ratio, compositing ----- */
+
+    // Cache a canvas for color-name parsing (browser-converts via fillStyle).
+    var _canvas, _ctx;
+    function ensureCanvas() {
+      if (_canvas) return;
+      _canvas = document.createElement("canvas");
+      _canvas.width = _canvas.height = 1;
+      _ctx = _canvas.getContext("2d");
+    }
+
+    function parseColor(str) {
+      if (!str || str === "transparent" || str === "none") return { r: 0, g: 0, b: 0, a: 0 };
+      // rgba / rgb fast path (most common; getComputedStyle returns these)
+      var m = str.match(/rgba?\(\s*(\d+(?:\.\d+)?)[ ,]+(\d+(?:\.\d+)?)[ ,]+(\d+(?:\.\d+)?)(?:[ ,/]+([\d.]+%?))?\s*\)/i);
+      if (m) {
+        var a = m[4] !== undefined ? (m[4].slice(-1) === "%" ? parseFloat(m[4]) / 100 : parseFloat(m[4])) : 1;
+        return { r: Math.round(+m[1]), g: Math.round(+m[2]), b: Math.round(+m[3]), a: a };
+      }
+      // 6-digit hex
+      var h6 = str.match(/^#([0-9a-f]{6})$/i);
+      if (h6) {
+        return { r: parseInt(h6[1].substr(0, 2), 16), g: parseInt(h6[1].substr(2, 2), 16), b: parseInt(h6[1].substr(4, 2), 16), a: 1 };
+      }
+      // 3-digit hex
+      var h3 = str.match(/^#([0-9a-f]{3})$/i);
+      if (h3) {
+        return { r: parseInt(h3[1][0] + h3[1][0], 16), g: parseInt(h3[1][1] + h3[1][1], 16), b: parseInt(h3[1][2] + h3[1][2], 16), a: 1 };
+      }
+      // Named colors, hsl(), oklch(), etc. — let the browser convert via canvas
+      try {
+        ensureCanvas();
+        _ctx.clearRect(0, 0, 1, 1);
+        _ctx.fillStyle = "rgba(0,0,0,0)";
+        _ctx.fillRect(0, 0, 1, 1);
+        _ctx.fillStyle = str;
+        _ctx.fillRect(0, 0, 1, 1);
+        var d = _ctx.getImageData(0, 0, 1, 1).data;
+        return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+      } catch (e) {
+        return { r: 0, g: 0, b: 0, a: 0 };
+      }
+    }
+
+    function colorToRgbaString(c) {
+      return "rgba(" + c.r + ", " + c.g + ", " + c.b + ", " + (Math.round(c.a * 1000) / 1000) + ")";
+    }
+    function colorToHex(c) {
+      function h(v) { var s = Math.max(0, Math.min(255, v)).toString(16); return s.length < 2 ? "0" + s : s; }
+      return "#" + h(c.r) + h(c.g) + h(c.b);
+    }
+
+    function relLuminance(c) {
+      function ch(v) {
+        v = v / 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      }
+      return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+    }
+
+    function contrastRatio(c1, c2) {
+      var l1 = relLuminance(c1), l2 = relLuminance(c2);
+      var lo = Math.min(l1, l2), hi = Math.max(l1, l2);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+
+    // Porter-Duff source-over composite: `over` painted on top of `base`.
+    function compositeOver(over, base) {
+      var a = over.a + base.a * (1 - over.a);
+      if (a === 0) return { r: 0, g: 0, b: 0, a: 0 };
+      return {
+        r: Math.round((over.r * over.a + base.r * base.a * (1 - over.a)) / a),
+        g: Math.round((over.g * over.a + base.g * base.a * (1 - over.a)) / a),
+        b: Math.round((over.b * over.a + base.b * base.a * (1 - over.a)) / a),
+        a: a
+      };
+    }
+
+    /* ----- helpers: visibility filters ----- */
+
+    function getStyle(el) {
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        return (win || window).getComputedStyle(el);
+      } catch (e) { return null; }
+    }
+
+    function isHiddenWithAncestors(el) {
+      var c = el;
+      while (c && c.nodeType === 1) {
+        var s = getStyle(c);
+        if (!s) return false;
+        if (s.display === "none" || s.visibility === "hidden" || parseFloat(s.opacity) === 0) return true;
+        c = c.parentElement;
+      }
+      return false;
+    }
+
+    function isVisuallyHidden(el) {
+      var s = getStyle(el);
+      if (!s) return false;
+      // Common sr-only patterns
+      if (s.position === "absolute" || s.position === "fixed") {
+        if (s.clip === "rect(1px, 1px, 1px, 1px)" || s.clip === "rect(0px, 0px, 0px, 0px)" ||
+            s.clip === "rect(0, 0, 0, 0)") return true;
+        if (s.width === "1px" && s.height === "1px" && s.overflow === "hidden") return true;
+        // clip-path inset 50% (modern sr-only)
+        if (s.clipPath && s.clipPath.indexOf("inset(50%)") !== -1) return true;
+      }
+      return false;
+    }
+
+    /* ----- complex-bg detection (gradients, images, video) ----- */
+
+    function hasComplexBg(bgImage) {
+      if (!bgImage || bgImage === "none") return { hasGradient: false, hasImage: false };
+      var lower = bgImage.toLowerCase();
+      return {
+        hasGradient: lower.indexOf("gradient") !== -1,
+        hasImage: lower.indexOf("url(") !== -1
+      };
+    }
+
+    /* ----- effective background by walking up the DOM ----- */
+
+    function getEffectiveBackground(el) {
+      var cur = el;
+      var composited = { r: 0, g: 0, b: 0, a: 0 };
+      var stoppedAtZIndex = false;
+      var zEl = null, zVal = null, zPos = null;
+      var hasGradient = false, hasImage = false;
+
+      while (cur && cur.nodeType === 1 && composited.a < 1) {
+        var s = getStyle(cur);
+        if (!s) break;
+        var complex = hasComplexBg(s.backgroundImage);
+        if (complex.hasGradient) hasGradient = true;
+        if (complex.hasImage) hasImage = true;
+
+        var bg = parseColor(s.backgroundColor);
+        if (bg.a > 0) composited = compositeOver(composited, bg);
+
+        // z-index stacking context: anything could be painted on top of us
+        // that we can't see from here
+        var zi = s.zIndex, pos = s.position;
+        if (zi !== "auto" && zi !== "" && (pos === "absolute" || pos === "relative" || pos === "fixed" || pos === "sticky")) {
+          stoppedAtZIndex = true; zEl = cur; zVal = zi; zPos = pos;
+          break;
+        }
+
+        if (composited.a >= 1 && !hasGradient && !hasImage) break;
+        cur = cur.parentElement;
+      }
+
+      // Reached root without finding opaque bg: browser uses white by default
+      if (composited.a < 1 && !hasGradient && !hasImage) {
+        composited = compositeOver(composited, { r: 255, g: 255, b: 255, a: 1 });
+      }
+
+      return {
+        bg: composited,
+        stoppedAtZIndex: stoppedAtZIndex,
+        zIndexElement: zEl,
+        zIndexValue: zVal,
+        zIndexPosition: zPos,
+        hasGradient: hasGradient,
+        hasImage: hasImage
+      };
+    }
+
+    /* ----- text overflow ----- */
+
+    function checkTextOverflow(el) {
+      var er, p, pr;
+      try {
+        er = el.getBoundingClientRect();
+        p = el.parentElement;
+        if (!p) return { hasOverflow: false };
+        pr = p.getBoundingClientRect();
+      } catch (e) { return { hasOverflow: false }; }
+      var overflows =
+        er.top < pr.top - 0.5 || er.bottom > pr.bottom + 0.5 ||
+        er.left < pr.left - 0.5 || er.right > pr.right + 0.5;
+      return overflows ? { hasOverflow: true, containerTag: p.tagName.toLowerCase() } : { hasOverflow: false };
+    }
+
+    /* ----- animation / long transition detection ----- */
+
+    function getAnimationInfo(el) {
+      var c = el;
+      while (c && c.nodeType === 1) {
+        var s = getStyle(c);
+        if (!s) break;
+        var animName = s.animationName || s.webkitAnimationName || "";
+        if (animName && animName !== "none") {
+          return { hasAnimation: true, type: "CSS animation", name: animName, tag: c.tagName.toLowerCase() };
+        }
+        var trans = s.transition || s.webkitTransition || "";
+        var transDur = s.transitionDuration || "0s";
+        var maxDur = 0;
+        transDur.split(",").forEach(function (d) {
+          d = d.trim();
+          var v = parseFloat(d);
+          if (isNaN(v)) return;
+          if (d.slice(-2) === "ms") v /= 1000;
+          if (v > maxDur) maxDur = v;
+        });
+        if (maxDur > 0.5 && trans && (
+          trans.indexOf("color") !== -1 || trans.indexOf("background") !== -1 ||
+          trans.indexOf("opacity") !== -1 || trans.indexOf("all") !== -1
+        )) {
+          return { hasAnimation: true, type: "CSS transition (>" + maxDur.toFixed(1) + "s)", name: trans, tag: c.tagName.toLowerCase() };
+        }
+        c = c.parentElement;
+      }
+      return { hasAnimation: false };
+    }
+
+    /* ----- unique selector (same as other checks) ----- */
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    /* ----- main scan ----- */
+
+    var results = [];
+    var seenEls = new Set();
+    var shadowRoots = 0;
+    var viewport = { width: window.innerWidth, height: window.innerHeight };
+
+    function processElement(el, textSample) {
+      if (seenEls.has(el)) return;
+      seenEls.add(el);
+      if (isHiddenWithAncestors(el)) return;
+      if (isVisuallyHidden(el)) return;
+      var rect;
+      try { rect = el.getBoundingClientRect(); } catch (e) { return; }
+      if (rect.width === 0 && rect.height === 0) return;
+
+      var s = getStyle(el);
+      if (!s) return;
+      var fg = parseColor(s.color);
+      var fontSize = parseFloat(s.fontSize);
+      var fontWeight = parseInt(s.fontWeight, 10) || 400;
+      var isBold = fontWeight >= 700;
+      // Per WCAG: ≥18pt (24px) normal OR ≥14pt (~18.66px) bold
+      var isLargeText = fontSize >= 24 || (fontSize >= 18.66 && isBold);
+
+      var bgInfo = getEffectiveBackground(el);
+      var overflowInfo = checkTextOverflow(el);
+      var animInfo = getAnimationInfo(el);
+
+      // Composite fg with bg in case fg has alpha < 1 (rare but happens)
+      var fgComposited = fg.a < 1 ? compositeOver(fg, bgInfo.bg) : fg;
+
+      // Build caveats list — every reason this calculation might be off
+      var caveats = [];
+      if (bgInfo.hasGradient) caveats.push({ code: "gradient-bg", text: "background contains a gradient — calculation uses only the underlying solid colour" });
+      if (bgInfo.hasImage) caveats.push({ code: "image-bg", text: "background contains an image — actual pixel under text may differ from the underlying colour" });
+      if (bgInfo.stoppedAtZIndex) caveats.push({ code: "z-index", text: 'walked into a z-index stacking context (<' + bgInfo.zIndexElement.tagName.toLowerCase() + '> position:' + bgInfo.zIndexPosition + ', z-index:' + bgInfo.zIndexValue + ') — could be overlapped by floating content' });
+      if (animInfo.hasAnimation) caveats.push({ code: "animation", text: animInfo.type + ' on ancestor <' + animInfo.tag + '> — colours change over time' });
+      if (overflowInfo.hasOverflow) caveats.push({ code: "overflow", text: "text overflows its <" + overflowInfo.containerTag + "> container — overflowing portion may sit on a different background" });
+
+      // Decide whether we can calculate at all
+      var canCalculate = bgInfo.bg.a >= 1 && !bgInfo.hasGradient && !bgInfo.hasImage;
+
+      var ratio = null;
+      var passesAA = false;
+      var passesAAA = false;
+      var requiredAA = isLargeText ? 3 : 4.5;
+      var requiredAAA = isLargeText ? 4.5 : 7;
+
+      if (canCalculate) {
+        // Skip if text and bg are identical — likely a data error rather than a real failure
+        if (fgComposited.r === bgInfo.bg.r && fgComposited.g === bgInfo.bg.g && fgComposited.b === bgInfo.bg.b) {
+          return;
+        }
+        ratio = contrastRatio(fgComposited, bgInfo.bg);
+        ratio = Math.round(ratio * 100) / 100;
+        passesAA = ratio >= requiredAA;
+        passesAAA = ratio >= requiredAAA;
+      }
+
+      // Determine status
+      // Note on z-index: per auto_a11y, "z-index alone" should NOT push us to
+      // cannot-calculate when contrast passes; it only matters when combined
+      // with other issues. So we keep the caveat but allow pass/fail.
+      var status;
+      if (!canCalculate) {
+        status = "cannot-calculate";
+      } else if (!passesAA) {
+        if (overflowInfo.hasOverflow) status = "partial-fail";
+        else status = "fail-aa";
+      } else {
+        // Passes AA. Are there caveats that make it pass-warn?
+        // z-index alone is not enough — only "real" calculation-affecting caveats.
+        var blockingCaveats = caveats.filter(function (c) {
+          return c.code === "gradient-bg" || c.code === "image-bg" || c.code === "animation" || c.code === "overflow";
+        });
+        status = blockingCaveats.length > 0 ? "pass-warn" : "pass";
+      }
+
+      results.push({
+        tag: el.tagName.toLowerCase(),
+        text: (textSample || "").substring(0, 120),
+        fg: colorToRgbaString(fgComposited),
+        fgHex: colorToHex(fgComposited),
+        bg: colorToRgbaString(bgInfo.bg),
+        bgHex: colorToHex(bgInfo.bg),
+        ratio: ratio,
+        passesAA: passesAA,
+        passesAAA: passesAAA,
+        requiredAA: requiredAA,
+        requiredAAA: requiredAAA,
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+        isBold: isBold,
+        isLargeText: isLargeText,
+        status: status,
+        caveats: caveats,
+        canCalculate: canCalculate,
+        selector: uniqueSelector(el),
+        rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
+      });
+    }
+
+    function walk(root) {
+      // TreeWalker over text nodes inside `root`. Shadow roots use the same
+      // mechanism (createTreeWalker accepts any node).
+      var doc = root.ownerDocument || (root.nodeType === 9 ? root : document);
+      var walker;
+      try {
+        walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+          acceptNode: function (node) {
+            if (!node.textContent || !node.textContent.trim()) return NodeFilter.FILTER_REJECT;
+            var p = node.parentElement;
+            if (!p) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        });
+      } catch (e) { return; }
+
+      var node;
+      while ((node = walker.nextNode())) {
+        processElement(node.parentElement, node.textContent.trim());
+      }
+
+      // Recurse into shadow roots
+      var allElements;
+      try { allElements = root.querySelectorAll("*"); } catch (e) { allElements = []; }
+      Array.prototype.forEach.call(allElements, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document.body || document.documentElement);
+
+    return {
+      url: window.location.href,
+      isTop: window === window.top,
+      results: results,
+      shadowRoots: shadowRoots,
+      viewport: viewport
+    };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
+  }
+}
+
+function displayContrast(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  var allResults = [];
+  var unmatchedFrames = 0;
+  var frameLabelByUrl = new Map();
+  var viewport = null;
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    if (frame.isTop && frame.viewport) viewport = frame.viewport;
+    if (!frame.results || !frame.results.length) return;
+    var offX = 0, offY = 0, positioned = true, inFrame = !frame.isTop;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    frame.results.forEach(function (r) {
+      allResults.push({
+        tag: r.tag, text: r.text,
+        fg: r.fg, fgHex: r.fgHex, bg: r.bg, bgHex: r.bgHex,
+        ratio: r.ratio,
+        passesAA: r.passesAA, passesAAA: r.passesAAA,
+        requiredAA: r.requiredAA, requiredAAA: r.requiredAAA,
+        fontSize: r.fontSize, fontWeight: r.fontWeight,
+        isBold: r.isBold, isLargeText: r.isLargeText,
+        status: r.status, caveats: r.caveats, canCalculate: r.canCalculate,
+        selector: r.selector,
+        frameUrl: frame.url,
+        frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
+        isTop: !inFrame,
+        pageTop: window.scrollY + offY + r.rect.top,
+        pageLeft: window.scrollX + offX + r.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      });
+    });
+  });
+  allResults.forEach(function (r, i) { r.index = i + 1; });
+
+  // Issues for Markdown / console — populated from caveats and status
+  allResults.forEach(function (r) {
+    r.issues = r.caveats.map(function (c) { return { text: c.text, related: [] }; });
+  });
+
+  function fmtIssuePanel(issue) {
+    if (!issue.related || !issue.related.length) return issue.text;
+    return issue.text + " (also: " + issue.related.map(function (i) { return "#" + i; }).join(", ") + ")";
+  }
+  function fmtIssueMd(issue) {
+    return mdEsc(issue.text);
+  }
+
+  // Resolve element refs for outline + click-to-scroll
+  allResults.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var color, style;
+        if (r.status === "fail-aa" || r.status === "partial-fail") { color = "#b00020"; style = "dashed"; }
+        else if (r.status === "pass-warn") { color = "#b45309"; style = "dashed"; }
+        else if (r.status === "cannot-calculate") { color = "#6a1b9a"; style = "dashed"; }
+        else { color = "#0a8043"; style = "solid"; }
+        el.style.setProperty("outline", "2px " + style + " " + color, "important");
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  // Shadow UI host
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var STATUS_COLORS = {
+    "pass":             "#0a8043",
+    "pass-warn":        "#b45309",
+    "fail-aa":          "#b00020",
+    "partial-fail":     "#b00020",
+    "cannot-calculate": "#6a1b9a"
+  };
+  var STATUS_LABELS = {
+    "pass":             "pass",
+    "pass-warn":        "pass-warn",
+    "fail-aa":          "FAIL",
+    "partial-fail":     "PARTIAL",
+    "cannot-calculate": "cannot calc"
+  };
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.pass{background:#0a8043;}" +
+    ".badge.pass-warn{background:#b45309;}" +
+    ".badge.fail-aa,.badge.partial-fail{background:#b00020;}" +
+    ".badge.cannot-calculate{background:#6a1b9a;}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:560px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;flex-wrap:wrap;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:13px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel .limits{padding:8px 14px;background:#faf5e6;border-bottom:1px solid #eee;font-size:13px;color:#7a4a09;}" +
+    ".panel .limits strong{color:#7a4a09;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;border-left:4px solid transparent;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li.status-fail-aa,.panel li.status-partial-fail{border-left-color:#b00020;}" +
+    ".panel li.status-pass-warn{border-left-color:#b45309;}" +
+    ".panel li.status-cannot-calculate{border-left-color:#6a1b9a;}" +
+    ".panel li.status-pass{border-left-color:#0a8043;}" +
+    ".panel.filter-fail li:not(.status-fail-aa):not(.status-partial-fail){display:none;}" +
+    ".panel.filter-warn li:not(.status-pass-warn){display:none;}" +
+    ".panel.filter-cannot li:not(.status-cannot-calculate){display:none;}" +
+    ".panel.filter-pass li:not(.status-pass){display:none;}" +
+    ".panel li .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}" +
+    ".panel li .statuschip{flex:0 0 auto;display:inline-block;min-width:88px;text-align:center;padding:3px 8px;border-radius:3px;color:#fff !important;font-size:13px;font-weight:700 !important;line-height:1.2;}" +
+    ".panel li .ratio{flex:0 0 auto;font-weight:600 !important;font-size:16px;color:#111;}" +
+    ".panel li .ratio.fail{color:#b00020;}" +
+    ".panel li .meta{flex:1 1 auto;color:#555;font-size:14px;min-width:120px;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .swatches{display:flex;gap:4px;margin-top:6px;align-items:center;font-size:13px;color:#555;}" +
+    ".panel li .swatch{display:inline-block;width:20px;height:20px;border:1px solid #999;border-radius:2px;flex-shrink:0;}" +
+    ".panel li .textsample{margin-top:4px;font-size:14px;color:#333;font-style:italic;word-break:break-word;}" +
+    ".panel li .caveats{margin-top:6px;font-size:13px;}" +
+    ".panel li .caveat{display:flex;gap:6px;margin-top:2px;color:#7a4a09;}" +
+    ".panel li .caveat::before{content:'⚠';flex:0 0 auto;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:4px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:13px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  // Badges
+  var badges = [];
+  allResults.forEach(function (r) {
+    if (!r.positioned) return;
+    var badge = document.createElement("div");
+    var cls = "badge " + r.status;
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    var prefix = r.isTop ? "" : "[frame] ";
+    var ratioStr = r.ratio != null ? r.ratio.toFixed(2) + ":1" : "n/a";
+    badge.textContent = "#" + r.index + " " + prefix + r.tag + " " + STATUS_LABELS[r.status] + " " + ratioStr;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  // Markdown
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  var md = "| # | Frame | Status | Ratio | Required | Text size | Foreground | Background | Caveats | Selector |\n";
+  md += "|---|-------|--------|-------|----------|-----------|------------|------------|---------|----------|\n";
+  allResults.forEach(function (r) {
+    var ratioCell = r.ratio != null ? r.ratio.toFixed(2) + ":1" : "—";
+    var required = r.requiredAA + ":1" + (r.isLargeText ? " (large)" : " (normal)");
+    var sizeCell = r.fontSize + "px" + (r.isBold ? " bold" : "");
+    var caveats = r.caveats.length ? "⚠ " + r.caveats.map(function (c) { return mdEsc(c.text); }).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    md += "| " + r.index + " | " + frameLabel + " | " + r.status + " | " + ratioCell + " | " + required + " | " + sizeCell + " | `" + r.fgHex + "` | `" + r.bgHex + "` | " + caveats + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  // Tallies
+  var counts = { pass: 0, "pass-warn": 0, "fail-aa": 0, "partial-fail": 0, "cannot-calculate": 0 };
+  allResults.forEach(function (r) { counts[r.status] = (counts[r.status] || 0) + 1; });
+  var frameCount = framesData.filter(function (f) { return !f.isTop && f.results && f.results.length; }).length;
+  var failCount = counts["fail-aa"] + counts["partial-fail"];
+
+  console.group("%c[a11yn contrast] " + allResults.length + " text elements — fail:" + failCount + " warn:" + counts["pass-warn"] + " cannot-calc:" + counts["cannot-calculate"] + " pass:" + counts.pass + " — top doc + " + frameCount + " frame(s)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allResults.map(function (r) {
+    return {
+      "#": r.index,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      tag: r.tag,
+      status: r.status,
+      ratio: r.ratio != null ? r.ratio.toFixed(2) + ":1" : "—",
+      required: r.requiredAA + ":1",
+      large: r.isLargeText ? "Y" : "",
+      bold: r.isBold ? "Y" : "",
+      size: r.fontSize + "px",
+      fg: r.fgHex,
+      bg: r.bgHex,
+      caveats: r.caveats.map(function (c) { return c.code; }).join(",")
+    };
+  }));
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel filter-all";
+
+  var summary = "";
+  if (allResults.length === 0) {
+    summary += '<span class="warn">No visible text found.</span>';
+  } else if (failCount === 0 && counts["pass-warn"] === 0 && counts["cannot-calculate"] === 0) {
+    summary += '<span class="ok">All ' + counts.pass + ' text elements pass WCAG AA.</span>';
+  } else {
+    var bits = [];
+    if (failCount) bits.push('<span class="miss">' + failCount + ' fail WCAG AA</span>');
+    if (counts["pass-warn"]) bits.push('<span class="warn">' + counts["pass-warn"] + ' pass-with-caveats</span>');
+    if (counts["cannot-calculate"]) bits.push('<span class="warn">' + counts["cannot-calculate"] + ' cannot calculate</span>');
+    summary += bits.join(" · ");
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
+  summary += counts.pass + " pass · " + counts["pass-warn"] + " pass-warn · " + counts["fail-aa"] + " fail · " + counts["partial-fail"] + " partial-fail · " + counts["cannot-calculate"] + " cannot-calc · top doc";
+  if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
+  if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
+  summary += '</div>';
+
+  var limits =
+    '<strong>Limitations of this v1 check:</strong> ' +
+    "tested only at the current viewport (" + (viewport ? viewport.width + "×" + viewport.height + "px" : "unknown") + ") — resize the browser and re-run to test other breakpoints. " +
+    "Pseudoclass states (<code>:hover</code>, <code>:focus</code>, <code>:visited</code>, <code>:active</code>, <code>:link</code>) and <code>prefers-contrast</code> media queries are not separately evaluated. " +
+    "Use ANDI, auto_a11y, or axe DevTools for those.";
+
+  panelEl.innerHTML =
+    "<header><strong>Contrast (" + allResults.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+      '<button data-filter="fail">Fail (' + failCount + ')</button>' +
+      '<button data-filter="warn">Warn (' + counts["pass-warn"] + ')</button>' +
+      '<button data-filter="cannot">Cannot calc (' + counts["cannot-calculate"] + ')</button>' +
+      '<button data-filter="pass">Pass (' + counts.pass + ')</button>' +
+    '</div>' +
+    '<div class="summary">' + summary + '</div>' +
+    '<div class="limits">' + limits + '</div>' +
+    '<ol id="' + P + 'list"></ol>';
+
+  var list = panelEl.querySelector("#" + P + "list");
+  allResults.forEach(function (r) {
+    var li = document.createElement("li");
+    li.classList.add("status-" + r.status);
+    var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+    var ratioStr = r.ratio != null ? r.ratio.toFixed(2) + ":1" : "—";
+    var ratioClass = (r.status === "fail-aa" || r.status === "partial-fail") ? "ratio fail" : "ratio";
+    var sizeStr = r.fontSize + "px" + (r.isBold ? " bold" : "") + " · " + (r.isLargeText ? "large" : "normal") + " (req " + r.requiredAA + ":1)";
+
+    var caveatsHtml = r.caveats.length
+      ? '<div class="caveats">' + r.caveats.map(function (c) { return '<div class="caveat">' + esc(c.text) + '</div>'; }).join("") + '</div>'
+      : "";
+
+    var aaaInfo = "";
+    if (r.canCalculate && r.passesAA && !r.passesAAA) {
+      aaaInfo = ' · <span style="color:#b45309">fails AAA (' + r.requiredAAA + ':1)</span>';
+    } else if (r.canCalculate && r.passesAAA) {
+      aaaInfo = ' · <span style="color:#0a8043">passes AAA</span>';
+    }
+
+    li.innerHTML =
+      '<div class="row">' +
+        '<span class="statuschip" style="background:' + STATUS_COLORS[r.status] + '">' + esc(STATUS_LABELS[r.status]) + '</span>' +
+        '<span class="' + ratioClass + '">' + ratioStr + '</span>' +
+        '<span class="meta">#' + r.index + " " + location + "<code>&lt;" + esc(r.tag) + "&gt;</code> " + esc(sizeStr) + aaaInfo + '</span>' +
+      "</div>" +
+      '<div class="textsample">"' + esc(r.text) + '"</div>' +
+      '<div class="swatches">' +
+        '<span class="swatch" style="background:' + esc(r.fg) + '"></span>' +
+        '<code>' + esc(r.fgHex) + '</code>' +
+        '<span style="margin:0 8px">on</span>' +
+        '<span class="swatch" style="background:' + esc(r.bg) + '"></span>' +
+        '<code>' + esc(r.bgHex) + '</code>' +
+      "</div>" +
+      caveatsHtml +
+      '<div class="src">' + esc(r.selector) + '</div>';
+
+    li.addEventListener("click", function () {
+      try {
+        if (r._resolveEl) {
+          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        } else if (r.iframeEl) {
+          r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (r.badge) {
+          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        }
+      } catch (e) {}
+    });
+    list.appendChild(li);
+  });
+  shadow.appendChild(panelEl);
+
+  // Drag-by-header
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allResults.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+}
+
+/* ====================================================================
+ * CHECK: DOCUMENT — page title + language inspector
+ *
+ * Covers:
+ *   WCAG 2.4.2  Page Titled
+ *   WCAG 3.1.1  Language of Page
+ *   WCAG 3.1.2  Language of Parts
+ *
+ * What it inspects:
+ *   1. <title>: presence, emptiness, generic/suspicious values, duplicates.
+ *   2. <html lang> and <html xml:lang>: presence, BCP 47 structural validity,
+ *      RFC 5646 case canonicalization, value mismatch between lang and
+ *      xml:lang on the same element.
+ *   3. Every other element with lang or xml:lang — full inventory, not just
+ *      problematic ones. Same validation as the html element. Cross-check
+ *      between lang and xml:lang on the same element.
+ *   4. Links with hreflang — validate the hreflang value (BCP 47).
+ *   5. Links whose href contains a URL-path or query-string language hint
+ *      (e.g. "/fr/page.html", "?lang=de") that differs from the page lang
+ *      and which has no hreflang — flagged as a Language-of-Parts risk
+ *      (3.1.2). Heuristic — auditor must verify the linked document's actual
+ *      content language.
+ *   6. Text attributes (alt, aria-label, title, placeholder, etc.) that
+ *      contain a literal "lang=" substring or HTML markup — smell that the
+ *      author tried to embed language declarations inside an attribute,
+ *      which is unparsed text and won't work.
+ *
+ * BCP 47 case conventions per RFC 5646 §2.1.1:
+ *   language  lowercase    (en, fr, zh)
+ *   script    TitleCase    (Latn, Hans)
+ *   region    UPPERCASE alpha or digits  (CA, US, 419)
+ *   variants  lowercase    (rozaj, 1996)
+ *
+ * Region subtags are validated against the ISO 3166-1 alpha-2 registry
+ * plus UN M.49 three-digit codes. Region affects which dialect voice a
+ * screen reader picks, so a wrong/unregistered region means the user
+ * gets the wrong pronunciation model — that's a real accessibility cost,
+ * not just a registry-maintenance concern.
+ * ==================================================================== */
+
+function scanDocument() {
+  "use strict";
+  try {
+
+    /* ----- Curated subtag tables ----- */
+
+    // ISO 639-1 / 639-2 common language subtags. We curate rather than
+    // include the entire 639 registry — the user is auditing web pages
+    // and the long tail rarely appears in real-world HTML.
+    var COMMON_LANGUAGES = new Set((
+      "aa ab ae af ak am an ar as av ay az " +
+      "ba be bg bh bi bm bn bo br bs " +
+      "ca ce ch co cr cs cu cv cy " +
+      "da de dv dz ee el en eo es et eu " +
+      "fa ff fi fj fo fr fy " +
+      "ga gd gl gn gu gv " +
+      "ha he hi ho hr ht hu hy hz " +
+      "ia id ie ig ii ik io is it iu " +
+      "ja jv " +
+      "ka kg ki kj kk kl km kn ko kr ks ku kv kw ky " +
+      "la lb lg li ln lo lt lu lv " +
+      "mg mh mi mk ml mn mr ms mt my " +
+      "na nb nd ne ng nl nn no nr nv ny " +
+      "oc oj om or os " +
+      "pa pi pl ps pt " +
+      "qu rm rn ro ru rw " +
+      "sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw " +
+      "ta te tg th ti tk tl tn to tr ts tt tw ty " +
+      "ug uk ur uz " +
+      "ve vi vo " +
+      "wa wo " +
+      "xh " +
+      "yi yo " +
+      "za zh zu " +
+      // Common 3-letter codes seen in HTML
+      "ace ach ady arn ast bal bem bho bin byn cad chk chm chr cmn dak div " +
+      "doi efi eka fil fon fur gez gil gmh got gwi haw hil hmn ibb ilo inh " +
+      "jbo jpr jrb kab kac kbd kha krc kru kut lad lez lol loz mad mag mai " +
+      "mas mdf men mic min mnc mni moh mos mus myv nap nia niu nog nso nyn " +
+      "pap pau peo phn pon raj rom rup sad sah sas sat scn sco sel shn smn " +
+      "sog srn syr tem tig tiv tli tmh tog tpi tsi udm umb vai vot wae wal " +
+      "war was xal yao yap zap zen zun zza"
+    ).split(/\s+/));
+
+    // ISO 3166-1 alpha-2 region subtags — these select dialect/regional
+    // pronunciation models in screen readers. Stored as one string per BCP 47
+    // group rather than a flat enumerated list.
+    var REGION_SUBTAGS = new Set((
+      "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ " +
+      "BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ " +
+      "CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ " +
+      "DE DJ DK DM DO DZ " +
+      "EC EE EG EH ER ES ET " +
+      "FI FJ FK FM FO FR " +
+      "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY " +
+      "HK HM HN HR HT HU " +
+      "ID IE IL IM IN IO IQ IR IS IT " +
+      "JE JM JO JP " +
+      "KE KG KH KI KM KN KP KR KW KY KZ " +
+      "LA LB LC LI LK LR LS LT LU LV LY " +
+      "MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ " +
+      "NA NC NE NF NG NI NL NO NP NR NU NZ " +
+      "OM " +
+      "PA PE PF PG PH PK PL PM PN PR PS PT PW PY " +
+      "QA " +
+      "RE RO RS RU RW " +
+      "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ " +
+      "TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ " +
+      "UA UG UM US UY UZ " +
+      "VA VC VE VG VI VN VU " +
+      "WF WS " +
+      "YE YT " +
+      "ZA ZM ZW"
+    ).split(/\s+/));
+
+    // ISO 15924 script subtags, common subset. TitleCase by convention.
+    var SCRIPT_SUBTAGS = new Set((
+      "Arab Armn Beng Bopo Brai Cans Cher Cyrl Deva Ethi Geor Grek Gujr Guru " +
+      "Hang Hani Hans Hant Hebr Hira Jpan Kana Khmr Knda Kore Laoo Latn Mlym " +
+      "Mong Mymr Orya Sinh Taml Telu Tfng Thaa Thai Tibt Yiii Zsym Zxxx Zyyy"
+    ).split(/\s+/));
+
+    // UN M.49 three-digit region subtags (macro-regions / continents)
+    var NUMERIC_REGIONS = new Set((
+      "001 002 003 005 009 011 013 014 015 017 018 019 021 029 030 034 035 " +
+      "039 053 054 057 061 142 143 145 150 151 154 155 202 419"
+    ).split(/\s+/));
+
+    /* ----- BCP 47 parser ----- */
+
+    function parseBcp47(tag) {
+      if (tag == null) return { present: false };
+      var t = String(tag).trim();
+      if (t === "") return { present: true, empty: true, raw: tag };
+      // Must be ASCII letters / digits / dashes
+      if (!/^[a-zA-Z0-9-]+$/.test(t)) {
+        return { present: true, raw: tag, valid: false, error: "contains characters outside ASCII letters/digits/hyphens" };
+      }
+      // Hyphens can't be doubled or at edges
+      if (t.indexOf("--") !== -1 || t.charAt(0) === "-" || t.charAt(t.length - 1) === "-") {
+        return { present: true, raw: tag, valid: false, error: "hyphens must not be doubled or at the start/end" };
+      }
+      var parts = t.split("-");
+      var result = { present: true, raw: tag, valid: true, language: null, extlangs: [], script: null, region: null, variants: [], extensions: [], privateUse: [] };
+
+      // Grandfathered / private-use start with "i" or "x"
+      if (parts[0].toLowerCase() === "x" && parts.length > 1) {
+        result.language = null;
+        result.isPrivateUseOnly = true;
+        for (var j = 1; j < parts.length; j++) {
+          if (!/^[a-zA-Z0-9]{1,8}$/.test(parts[j])) {
+            return { present: true, raw: tag, valid: false, error: 'invalid private-use subtag "' + parts[j] + '"' };
+          }
+          result.privateUse.push(parts[j]);
+        }
+        result.canonical = "x-" + result.privateUse.map(function (p) { return p.toLowerCase(); }).join("-");
+        return result;
+      }
+
+      // Primary language: 2-3 letters (ISO 639-1/2)
+      if (!/^[a-zA-Z]{2,3}$/.test(parts[0])) {
+        return { present: true, raw: tag, valid: false, error: 'primary language subtag should be 2 or 3 letters (got "' + parts[0] + '")' };
+      }
+      result.language = parts[0];
+      var i = 1;
+
+      // Optional extended languages (up to 3 × 3-letter)
+      while (i < parts.length && /^[a-zA-Z]{3}$/.test(parts[i]) && result.extlangs.length < 3) {
+        // Only treat as extlang if followed by something that's not a script/region/variant
+        // Heuristic: if next part is 4 letters (script) or 2 letters (region) or 4+ alphanumeric (variant), this 3-letter could still be extlang
+        // For simplicity, accept it as extlang and move on
+        result.extlangs.push(parts[i]);
+        i++;
+      }
+
+      // Optional script: exactly 4 letters
+      if (i < parts.length && /^[a-zA-Z]{4}$/.test(parts[i])) {
+        result.script = parts[i];
+        i++;
+      }
+
+      // Optional region: 2 letters or 3 digits
+      if (i < parts.length && /^([a-zA-Z]{2}|[0-9]{3})$/.test(parts[i])) {
+        result.region = parts[i];
+        i++;
+      }
+
+      // Variants: 5-8 alphanumeric, or 4 starting with digit
+      while (i < parts.length && /^([a-zA-Z0-9]{5,8}|[0-9][a-zA-Z0-9]{3})$/.test(parts[i])) {
+        result.variants.push(parts[i]);
+        i++;
+      }
+
+      // Extensions: single letter (not x), then 2-8 char subtags
+      while (i < parts.length && /^[a-wy-zA-WY-Z]$/.test(parts[i])) {
+        var ext = [parts[i]];
+        i++;
+        while (i < parts.length && /^[a-zA-Z0-9]{2,8}$/.test(parts[i]) && !/^[a-wy-zA-WY-Z]$/.test(parts[i]) && parts[i].toLowerCase() !== "x") {
+          ext.push(parts[i]);
+          i++;
+        }
+        if (ext.length < 2) {
+          return { present: true, raw: tag, valid: false, error: 'extension singleton "' + ext[0] + '" needs at least one subtag' };
+        }
+        result.extensions.push(ext);
+      }
+
+      // Private use suffix: "x" then 1-8 char subtags
+      if (i < parts.length && parts[i].toLowerCase() === "x") {
+        i++;
+        while (i < parts.length) {
+          if (!/^[a-zA-Z0-9]{1,8}$/.test(parts[i])) {
+            return { present: true, raw: tag, valid: false, error: 'invalid private-use subtag "' + parts[i] + '"' };
+          }
+          result.privateUse.push(parts[i]);
+          i++;
+        }
+      }
+
+      if (i < parts.length) {
+        return { present: true, raw: tag, valid: false, error: 'unexpected subtag "' + parts[i] + '" at position ' + (i + 1) };
+      }
+
+      result.canonical = canonicalize(result);
+      return result;
+    }
+
+    function canonicalize(r) {
+      var parts = [];
+      if (r.language) parts.push(r.language.toLowerCase());
+      r.extlangs.forEach(function (x) { parts.push(x.toLowerCase()); });
+      if (r.script) parts.push(r.script.charAt(0).toUpperCase() + r.script.slice(1).toLowerCase());
+      if (r.region) parts.push(/^[0-9]+$/.test(r.region) ? r.region : r.region.toUpperCase());
+      r.variants.forEach(function (v) { parts.push(v.toLowerCase()); });
+      r.extensions.forEach(function (e) { parts.push(e.map(function (s) { return s.toLowerCase(); }).join("-")); });
+      if (r.privateUse.length) {
+        parts.push("x");
+        r.privateUse.forEach(function (p) { parts.push(p.toLowerCase()); });
+      }
+      return parts.join("-");
+    }
+
+    function validateTag(raw) {
+      var p = parseBcp47(raw);
+      if (!p.present) return { present: false, raw: null, valid: false, issues: [], warnings: [] };
+      if (p.empty) {
+        return { present: true, empty: true, raw: raw, valid: false, issues: ["empty value (lang=\"\")"], warnings: [] };
+      }
+      if (!p.valid) {
+        return { present: true, raw: raw, valid: false, issues: ["structurally invalid: " + p.error], warnings: [] };
+      }
+
+      var issues = [];
+      var warnings = [];
+
+      // Case canonicalization check
+      if (p.canonical !== p.raw) {
+        var caseProblems = [];
+        if (p.language && p.language !== p.language.toLowerCase()) {
+          caseProblems.push('language subtag should be lowercase ("' + p.language.toLowerCase() + '", not "' + p.language + '")');
+        }
+        if (p.script && p.script !== p.script.charAt(0).toUpperCase() + p.script.slice(1).toLowerCase()) {
+          var canScript = p.script.charAt(0).toUpperCase() + p.script.slice(1).toLowerCase();
+          caseProblems.push('script subtag should be TitleCase ("' + canScript + '", not "' + p.script + '")');
+        }
+        if (p.region && /^[a-zA-Z]+$/.test(p.region) && p.region !== p.region.toUpperCase()) {
+          caseProblems.push('region subtag should be UPPERCASE ("' + p.region.toUpperCase() + '", not "' + p.region + '")');
+        }
+        p.variants.forEach(function (v) {
+          if (v !== v.toLowerCase()) {
+            caseProblems.push('variant subtag should be lowercase ("' + v.toLowerCase() + '", not "' + v + '")');
+          }
+        });
+        if (caseProblems.length) {
+          issues.push("case convention: " + caseProblems.join("; ") + " (canonical: " + p.canonical + ")");
+        }
+      }
+
+      // Subtag-value validation
+      if (p.language) {
+        var lang = p.language.toLowerCase();
+        if (!COMMON_LANGUAGES.has(lang)) {
+          warnings.push('language subtag "' + lang + '" is not in the curated common-languages list — verify it is an ISO 639 code');
+        }
+      }
+      if (p.region) {
+        var reg = /^[a-zA-Z]+$/.test(p.region) ? p.region.toUpperCase() : p.region;
+        if (/^[a-zA-Z]+$/.test(p.region)) {
+          if (!REGION_SUBTAGS.has(reg)) {
+            issues.push('region subtag "' + reg + '" is not a registered ISO 3166-1 alpha-2 code — screen readers may not pick the intended dialect voice');
+          }
+        } else {
+          if (!NUMERIC_REGIONS.has(reg)) {
+            warnings.push('numeric region subtag "' + reg + '" is not a registered UN M.49 code');
+          }
+        }
+      }
+      if (p.script) {
+        var sc = p.script.charAt(0).toUpperCase() + p.script.slice(1).toLowerCase();
+        if (!SCRIPT_SUBTAGS.has(sc)) {
+          warnings.push('script subtag "' + sc + '" is not in the curated ISO 15924 list — verify it is a real script code');
+        }
+      }
+
+      return {
+        present: true,
+        raw: raw,
+        valid: true,
+        parsed: p,
+        canonical: p.canonical,
+        caseMatches: p.canonical === p.raw,
+        issues: issues,
+        warnings: warnings
+      };
+    }
+
+    /* ----- DOM helpers ----- */
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    function getXmlLang(el) {
+      // Try the namespaced accessor first (correct way), fall back to literal attribute
+      try {
+        var ns = el.getAttributeNS && el.getAttributeNS("http://www.w3.org/XML/1998/namespace", "lang");
+        if (ns !== null && ns !== undefined) return ns;
+      } catch (e) {}
+      return el.getAttribute("xml:lang");
+    }
+
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    /* ----- Title ----- */
+
+    var titleEls = document.querySelectorAll("title");
+    // Prefer titles in <head>
+    var titleEl = null;
+    for (var ti = 0; ti < titleEls.length; ti++) {
+      if (titleEls[ti].ownerDocument === document &&
+          (titleEls[ti].parentNode === document.head || titleEls[ti].closest("head"))) {
+        titleEl = titleEls[ti]; break;
+      }
+    }
+    if (!titleEl && titleEls.length) titleEl = titleEls[0];
+
+    var titleText = titleEl ? txt(titleEl.textContent) : null;
+    var titleResult = {
+      present: !!titleEl,
+      multipleTitles: titleEls.length,
+      value: titleText,
+      issues: []
+    };
+    if (!titleEl) {
+      titleResult.issues.push({ severity: "error", text: "no <title> element in the document (WCAG 2.4.2)" });
+    } else if (!titleText) {
+      titleResult.issues.push({ severity: "error", text: "<title> exists but is empty (WCAG 2.4.2)" });
+    } else {
+      var lower = titleText.toLowerCase();
+      var generic = /^(untitled|untitled document|new page|new tab|document|home page|home|page|index|default|test|untitled-?\d*)\.?$/;
+      if (generic.test(lower)) {
+        titleResult.issues.push({ severity: "warn", text: 'title is generic ("' + titleText + '")' });
+      }
+      try {
+        var hostname = window.location.hostname.toLowerCase();
+        if (lower === hostname || lower === window.location.href.toLowerCase()) {
+          titleResult.issues.push({ severity: "warn", text: "title matches the URL or hostname rather than describing the page" });
+        }
+      } catch (e) {}
+      if (titleEls.length > 1) {
+        titleResult.issues.push({ severity: "warn", text: titleEls.length + " <title> elements found (should be exactly one)" });
+      }
+    }
+
+    /* ----- <html lang> and <html xml:lang> ----- */
+
+    var htmlEl = document.documentElement;
+    var htmlLangAttr = htmlEl ? htmlEl.getAttribute("lang") : null;
+    var htmlXmlLangAttr = htmlEl ? getXmlLang(htmlEl) : null;
+
+    var htmlLang = validateTag(htmlLangAttr);
+    var htmlXmlLang = validateTag(htmlXmlLangAttr);
+    htmlLang.location = "<html lang>";
+    htmlXmlLang.location = "<html xml:lang>";
+
+    if (!htmlLangAttr) {
+      htmlLang.issues = ["<html> element has no lang attribute (WCAG 3.1.1)"];
+      htmlLang.valid = false;
+    }
+
+    var htmlLangXmlMismatch = null;
+    if (htmlLangAttr && htmlXmlLangAttr) {
+      // Compare canonicals so case differences don't trigger a false alarm
+      var lc = htmlLang.canonical || htmlLangAttr;
+      var xc = htmlXmlLang.canonical || htmlXmlLangAttr;
+      if (lc !== xc) {
+        htmlLangXmlMismatch = {
+          lang: htmlLangAttr,
+          xmlLang: htmlXmlLangAttr,
+          text: '<html lang="' + htmlLangAttr + '"> and <html xml:lang="' + htmlXmlLangAttr + '"> must be equivalent — they are different'
+        };
+      }
+    }
+
+    /* ----- Every element with lang or xml:lang (inventory) ----- */
+
+    var langAttrs = [];
+    // Query for both — supported in modern browsers; need to escape colon for xml:lang
+    var allWithLang;
+    try {
+      allWithLang = document.body
+        ? document.body.querySelectorAll("[lang], [\\:lang], [xml\\:lang]")
+        : [];
+    } catch (e) {
+      // Fallback: full doc scan
+      allWithLang = document.body ? document.body.querySelectorAll("*") : [];
+    }
+
+    Array.prototype.forEach.call(allWithLang, function (el) {
+      var l = el.getAttribute("lang");
+      var xl = getXmlLang(el);
+      if (l === null && xl === null) return;
+
+      var lv = l !== null ? validateTag(l) : null;
+      var xlv = xl !== null ? validateTag(xl) : null;
+      var entry = {
+        tag: el.tagName.toLowerCase(),
+        selector: uniqueSelector(el),
+        lang: lv,
+        xmlLang: xlv,
+        sampleText: txt((el.textContent || "")).slice(0, 80),
+        issues: []
+      };
+
+      // Same-element lang vs xml:lang mismatch
+      if (lv && xlv) {
+        var lcan = lv.canonical || l;
+        var xcan = xlv.canonical || xl;
+        if (lcan !== xcan) {
+          entry.issues.push({ severity: "error", text: 'lang="' + l + '" and xml:lang="' + xl + '" must match — they are different' });
+        }
+      }
+
+      langAttrs.push(entry);
+    });
+
+    /* ----- Links with hreflang ----- */
+
+    var pageLanguageCanonical = htmlLang.canonical || null;
+
+    var hreflangLinks = [];
+    Array.prototype.forEach.call(document.querySelectorAll("a[hreflang], link[hreflang], area[hreflang]"), function (el) {
+      var hl = el.getAttribute("hreflang");
+      var hlv = validateTag(hl);
+      hreflangLinks.push({
+        tag: el.tagName.toLowerCase(),
+        selector: uniqueSelector(el),
+        href: el.getAttribute("href") || "",
+        linkText: txt(el.textContent).slice(0, 80) || "(no text)",
+        hreflang: hlv,
+        matchesPageLang: pageLanguageCanonical && hlv.canonical === pageLanguageCanonical
+      });
+    });
+
+    /* ----- URL language hints on <a href> (heuristic) ----- */
+
+    // Detect URL paths or query strings that hint at a target language
+    // different from the page language. Heuristic — auditor must verify.
+    function detectUrlLangHint(href) {
+      if (!href) return null;
+      var lcHref = href.toLowerCase();
+      // Skip in-page anchors and javascript:
+      if (lcHref.indexOf("#") === 0 || lcHref.indexOf("javascript:") === 0 ||
+          lcHref.indexOf("mailto:") === 0 || lcHref.indexOf("tel:") === 0) return null;
+
+      // /xx/ or /xx-XX/ at start of path
+      var pathMatch = lcHref.match(/\/([a-z]{2,3})(?:[-_]([a-z]{2}))?(?:\/|$)/);
+      if (pathMatch) {
+        var lc = pathMatch[1];
+        if (COMMON_LANGUAGES.has(lc) && lc !== "en") {
+          // Only flag if not English (default-assumed of most pages and most common path noise)
+          // We deliberately use this as a hint, not a hard rule.
+          return { source: "url path", code: pathMatch[2] ? (lc + "-" + pathMatch[2].toUpperCase()) : lc };
+        }
+      }
+
+      // ?lang=xx or ?language=xx-XX or ?locale=xx_XX
+      var queryMatch = lcHref.match(/[?&](?:lang|language|locale|l|hl)=([a-z]{2,3})(?:[-_]([a-z]{2}))?/);
+      if (queryMatch) {
+        var qc = queryMatch[1];
+        if (COMMON_LANGUAGES.has(qc)) {
+          return { source: "query string", code: queryMatch[2] ? (qc + "-" + queryMatch[2].toUpperCase()) : qc };
+        }
+      }
+
+      return null;
+    }
+
+    var foreignUrls = [];
+    Array.prototype.forEach.call(document.querySelectorAll("a[href]"), function (el) {
+      var href = el.getAttribute("href") || "";
+      var hint = detectUrlLangHint(href);
+      if (!hint) return;
+      // If link already has hreflang matching the hint, no flag needed
+      var hl = el.getAttribute("hreflang");
+      var hintLangPart = hint.code.split("-")[0];
+      var pageLangPart = pageLanguageCanonical ? pageLanguageCanonical.split("-")[0] : null;
+      // Only flag if hint language differs from page language
+      if (pageLangPart && hintLangPart === pageLangPart) return;
+      // Only flag if hreflang is missing OR doesn't match the hint's primary language
+      var matchesHl = hl && hl.toLowerCase().split("-")[0] === hintLangPart;
+      if (matchesHl) return;
+      foreignUrls.push({
+        tag: el.tagName.toLowerCase(),
+        selector: uniqueSelector(el),
+        href: href,
+        linkText: txt(el.textContent).slice(0, 80) || "(no text)",
+        hint: hint,
+        existingHreflang: hl
+      });
+    });
+
+    /* ----- Embedded lang in text attributes (smell) ----- */
+
+    var TEXT_ATTRS = ["alt", "title", "aria-label", "aria-roledescription", "aria-description", "placeholder"];
+    var embeddedLangs = [];
+    Array.prototype.forEach.call(document.querySelectorAll(
+      "[alt],[title],[aria-label],[aria-roledescription],[aria-description],[placeholder]"
+    ), function (el) {
+      TEXT_ATTRS.forEach(function (a) {
+        var v = el.getAttribute(a);
+        if (v === null) return;
+        // Smell 1: contains "lang=" substring (someone tried to embed a lang declaration)
+        var hasLangEq = /\blang\s*=/i.test(v) || /\bxml:lang\s*=/i.test(v);
+        // Smell 2: contains literal HTML-looking markup
+        var hasHtml = /<[a-z][^>]*>/i.test(v);
+        if (hasLangEq || hasHtml) {
+          embeddedLangs.push({
+            tag: el.tagName.toLowerCase(),
+            selector: uniqueSelector(el),
+            attr: a,
+            value: v.length > 120 ? v.slice(0, 120) + "…" : v,
+            issues: [
+              hasLangEq ? { severity: "warn", text: 'attribute contains "lang=" substring — attribute values are plain text, not HTML; the lang declaration will not take effect' } : null,
+              hasHtml ? { severity: "warn", text: 'attribute contains HTML-looking markup — attribute values are unparsed text, so any markup is displayed literally to assistive tech' } : null
+            ].filter(Boolean)
+          });
+        }
+      });
+    });
+
+    return {
+      url: window.location.href,
+      isTop: window === window.top,
+      title: titleResult,
+      htmlLang: htmlLang,
+      htmlXmlLang: htmlXmlLang,
+      htmlLangXmlMismatch: htmlLangXmlMismatch,
+      langAttrs: langAttrs,
+      hreflangLinks: hreflangLinks,
+      foreignUrls: foreignUrls,
+      embeddedLangs: embeddedLangs,
+      pageLanguageCanonical: pageLanguageCanonical
+    };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, error: String(e && e.message || e) };
+  }
+}
+
+function displayDocument(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+
+  // Flatten frame data into a single sequence of "findings", each with a
+  // category for the filter bar. Top frame is reported first; iframes follow.
+  var findings = [];
+  var frameLabelByUrl = new Map();
+
+  framesData.forEach(function (frame, fi) {
+    if (!frame || frame.error) return;
+    var inFrame = !frame.isTop;
+    var frameLabel = null;
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabel = u.hostname + u.pathname.replace(/\/$/, ""); }
+      catch (e) { frameLabel = frame.url; }
+      frameLabelByUrl.set(frame.url, frameLabel);
+    }
+    var fp = { frameUrl: frame.url, frameLabel: frameLabel, isTop: !inFrame };
+
+    // Title
+    if (frame.title) {
+      findings.push(Object.assign({}, fp, {
+        category: "title",
+        kind: "page-title",
+        title: frame.title
+      }));
+    }
+
+    // <html lang>
+    if (frame.htmlLang) {
+      findings.push(Object.assign({}, fp, {
+        category: "page-lang",
+        kind: "html-lang",
+        tag: frame.htmlLang
+      }));
+    }
+    // <html xml:lang>
+    if (frame.htmlXmlLang && frame.htmlXmlLang.present) {
+      findings.push(Object.assign({}, fp, {
+        category: "page-lang",
+        kind: "html-xml-lang",
+        tag: frame.htmlXmlLang
+      }));
+    }
+    if (frame.htmlLangXmlMismatch) {
+      findings.push(Object.assign({}, fp, {
+        category: "page-lang",
+        kind: "html-lang-xml-mismatch",
+        mismatch: frame.htmlLangXmlMismatch
+      }));
+    }
+
+    // Per-element lang/xml:lang
+    (frame.langAttrs || []).forEach(function (a) {
+      findings.push(Object.assign({}, fp, {
+        category: "lang-attr",
+        kind: "element-lang",
+        attr: a
+      }));
+    });
+
+    // Links with hreflang
+    (frame.hreflangLinks || []).forEach(function (h) {
+      findings.push(Object.assign({}, fp, {
+        category: "hreflang",
+        kind: "hreflang-link",
+        link: h
+      }));
+    });
+
+    // Foreign URLs (3.1.2 risk)
+    (frame.foreignUrls || []).forEach(function (l) {
+      findings.push(Object.assign({}, fp, {
+        category: "foreign-url",
+        kind: "foreign-url",
+        link: l
+      }));
+    });
+
+    // Embedded lang in text attrs
+    (frame.embeddedLangs || []).forEach(function (e) {
+      findings.push(Object.assign({}, fp, {
+        category: "embedded",
+        kind: "embedded-lang",
+        embedded: e
+      }));
+    });
+  });
+
+  findings.forEach(function (f, i) { f.index = i + 1; });
+
+  // Compute counts per category
+  var counts = { title: 0, "page-lang": 0, "lang-attr": 0, hreflang: 0, "foreign-url": 0, embedded: 0 };
+  var issueCount = 0;
+  findings.forEach(function (f) {
+    counts[f.category] = (counts[f.category] || 0) + 1;
+    if (findingHasIssue(f)) issueCount++;
+  });
+
+  function findingHasIssue(f) {
+    if (f.kind === "page-title") return f.title.issues.some(function (i) { return i.severity === "error" || i.severity === "warn"; });
+    if (f.kind === "html-lang") return !f.tag.valid || (f.tag.issues && f.tag.issues.length);
+    if (f.kind === "html-xml-lang") return !f.tag.valid || (f.tag.issues && f.tag.issues.length);
+    if (f.kind === "html-lang-xml-mismatch") return true;
+    if (f.kind === "element-lang") {
+      if (f.attr.issues && f.attr.issues.length) return true;
+      if (f.attr.lang && f.attr.lang.issues && f.attr.lang.issues.length) return true;
+      if (f.attr.xmlLang && f.attr.xmlLang.issues && f.attr.xmlLang.issues.length) return true;
+      return false;
+    }
+    if (f.kind === "hreflang-link") return !f.link.hreflang.valid || (f.link.hreflang.issues && f.link.hreflang.issues.length);
+    if (f.kind === "foreign-url") return true;
+    if (f.kind === "embedded-lang") return f.embedded.issues && f.embedded.issues.length > 0;
+    return false;
+  }
+
+  // ----- Shadow UI -----
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".panel{position:fixed;top:12px;right:12px;width:600px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;flex-wrap:wrap;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:13px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;border-left:4px solid transparent;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li.has-issue{border-left-color:#b00020;}" +
+    ".panel li.has-warn{border-left-color:#b45309;}" +
+    ".panel li.ok-row{border-left-color:#0a8043;}" +
+    ".panel.filter-title li:not(.cat-title){display:none;}" +
+    ".panel.filter-page-lang li:not(.cat-page-lang){display:none;}" +
+    ".panel.filter-lang-attr li:not(.cat-lang-attr){display:none;}" +
+    ".panel.filter-hreflang li:not(.cat-hreflang){display:none;}" +
+    ".panel.filter-foreign-url li:not(.cat-foreign-url){display:none;}" +
+    ".panel.filter-embedded li:not(.cat-embedded){display:none;}" +
+    ".panel.filter-issues li:not(.has-issue):not(.has-warn){display:none;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .catchip{display:inline-block;padding:2px 8px;border-radius:3px;color:#fff !important;font-size:12px;font-weight:700 !important;line-height:1.3;background:#003876;}" +
+    ".panel li .statuschip{display:inline-block;padding:2px 8px;border-radius:3px;color:#fff !important;font-size:12px;font-weight:700 !important;line-height:1.3;}" +
+    ".panel li .statuschip.ok{background:#0a8043;}" +
+    ".panel li .statuschip.warn{background:#b45309;}" +
+    ".panel li .statuschip.err{background:#b00020;}" +
+    ".panel li .statuschip.info{background:#003876;}" +
+    ".panel li .body{margin-top:4px;}" +
+    ".panel li .title-text{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
+    ".panel li .title-text.empty{color:#b00020;font-style:italic;}" +
+    ".panel li .tagvalue{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 6px;border-radius:3px;color:#111;}" +
+    ".panel li .canonical{color:#0a5d2e;font-family:ui-monospace,monospace !important;font-size:14px;}" +
+    ".panel li .row-line{margin:2px 0;font-size:14px;color:#333;}" +
+    ".panel li .issuetext{color:#b00020;font-size:14px;margin-top:3px;font-weight:600 !important;}" +
+    ".panel li .warntext{color:#b45309;font-size:14px;margin-top:3px;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:3px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}" +
+    ".panel li .swatch{display:inline-block;font-family:ui-monospace,monospace !important;font-size:13px;color:#333;padding:1px 4px;background:rgba(0,0,0,.04);border-radius:2px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  /* ----- Build summary ----- */
+
+  var totalIssues = findings.filter(findingHasIssue).length;
+  var summary = "";
+  if (findings.length === 0) {
+    summary += '<span class="warn">No title or language information found.</span>';
+  } else if (totalIssues === 0) {
+    summary += '<span class="ok">All ' + findings.length + ' findings look fine.</span>';
+  } else {
+    summary += '<span class="miss">' + totalIssues + ' finding' + (totalIssues === 1 ? "" : "s") + ' with issues</span> of ' + findings.length + ' total.';
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">' +
+    counts.title + ' title · ' +
+    counts["page-lang"] + ' page-lang · ' +
+    counts["lang-attr"] + ' lang-attr · ' +
+    counts.hreflang + ' hreflang · ' +
+    counts["foreign-url"] + ' foreign-url · ' +
+    counts.embedded + ' embedded' +
+    '</div>';
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel filter-all";
+  panelEl.innerHTML =
+    "<header><strong>Title &amp; Language (" + findings.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + findings.length + ')</button>' +
+      '<button data-filter="issues">Issues (' + totalIssues + ')</button>' +
+      '<button data-filter="title">Title (' + counts.title + ')</button>' +
+      '<button data-filter="page-lang">Page lang (' + counts["page-lang"] + ')</button>' +
+      '<button data-filter="lang-attr">Lang attrs (' + counts["lang-attr"] + ')</button>' +
+      '<button data-filter="hreflang">hreflang (' + counts.hreflang + ')</button>' +
+      '<button data-filter="foreign-url">Foreign URLs (' + counts["foreign-url"] + ')</button>' +
+      '<button data-filter="embedded">Embedded (' + counts.embedded + ')</button>' +
+    '</div>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<ol id="' + P + 'list"></ol>';
+
+  /* ----- Render each finding ----- */
+
+  function tagValueHtml(tv) {
+    if (!tv || tv.present === false) return '<span class="warn">(not set)</span>';
+    if (tv.empty) return '<span class="tagvalue">""</span> <span class="warn">(empty)</span>';
+    var raw = '<span class="tagvalue">"' + esc(tv.raw) + '"</span>';
+    if (tv.canonical && tv.canonical !== tv.raw) {
+      raw += ' <span class="canonical">→ canonical: "' + esc(tv.canonical) + '"</span>';
+    }
+    return raw;
+  }
+
+  function renderFindingBody(f) {
+    if (f.kind === "page-title") {
+      var t = f.title;
+      var parts = [];
+      parts.push('<div class="row-line"><strong>Title:</strong> <span class="title-text' + (t.value ? '' : ' empty') + '">' + (t.value ? esc(t.value) : "(empty)") + '</span></div>');
+      if (t.multipleTitles && t.multipleTitles > 1) {
+        parts.push('<div class="row-line">' + t.multipleTitles + ' &lt;title&gt; elements found.</div>');
+      }
+      t.issues.forEach(function (iss) {
+        var cls = iss.severity === "error" ? "issuetext" : "warntext";
+        parts.push('<div class="' + cls + '">' + esc(iss.text) + '</div>');
+      });
+      return parts.join("");
+    }
+    if (f.kind === "html-lang" || f.kind === "html-xml-lang") {
+      var loc = f.kind === "html-lang" ? "&lt;html lang&gt;" : "&lt;html xml:lang&gt;";
+      var parts2 = [];
+      parts2.push('<div class="row-line"><strong>' + loc + ':</strong> ' + tagValueHtml(f.tag) + '</div>');
+      (f.tag.issues || []).forEach(function (iss) {
+        parts2.push('<div class="issuetext">' + esc(iss) + '</div>');
+      });
+      (f.tag.warnings || []).forEach(function (w) {
+        parts2.push('<div class="warntext">' + esc(w) + '</div>');
+      });
+      if (f.tag.parsed && f.tag.valid) {
+        var bits = [];
+        var pp = f.tag.parsed;
+        if (pp.language) bits.push("language=<span class=\"swatch\">" + esc(pp.language.toLowerCase()) + "</span>");
+        if (pp.script) bits.push("script=<span class=\"swatch\">" + esc(pp.script) + "</span>");
+        if (pp.region) bits.push("region=<span class=\"swatch\">" + esc(pp.region) + "</span>");
+        if (pp.variants && pp.variants.length) bits.push("variants=<span class=\"swatch\">" + esc(pp.variants.join(", ")) + "</span>");
+        if (bits.length) parts2.push('<div class="row-line">' + bits.join(" &middot; ") + "</div>");
+      }
+      return parts2.join("");
+    }
+    if (f.kind === "html-lang-xml-mismatch") {
+      return '<div class="issuetext">' + esc(f.mismatch.text) + '</div>';
+    }
+    if (f.kind === "element-lang") {
+      var a = f.attr;
+      var lines = [];
+      lines.push('<div class="row-line"><code>&lt;' + esc(a.tag) + '&gt;</code></div>');
+      if (a.lang) {
+        lines.push('<div class="row-line"><strong>lang:</strong> ' + tagValueHtml(a.lang) + '</div>');
+        (a.lang.issues || []).forEach(function (iss) { lines.push('<div class="issuetext">' + esc(iss) + '</div>'); });
+        (a.lang.warnings || []).forEach(function (w) { lines.push('<div class="warntext">' + esc(w) + '</div>'); });
+      }
+      if (a.xmlLang) {
+        lines.push('<div class="row-line"><strong>xml:lang:</strong> ' + tagValueHtml(a.xmlLang) + '</div>');
+        (a.xmlLang.issues || []).forEach(function (iss) { lines.push('<div class="issuetext">' + esc(iss) + '</div>'); });
+        (a.xmlLang.warnings || []).forEach(function (w) { lines.push('<div class="warntext">' + esc(w) + '</div>'); });
+      }
+      (a.issues || []).forEach(function (iss) {
+        var cls = iss.severity === "error" ? "issuetext" : "warntext";
+        lines.push('<div class="' + cls + '">' + esc(iss.text) + '</div>');
+      });
+      if (a.sampleText) {
+        lines.push('<div class="row-line" style="color:#666;font-style:italic">' + esc(a.sampleText) + (a.sampleText.length === 80 ? "…" : "") + '</div>');
+      }
+      lines.push('<div class="src">' + esc(a.selector) + '</div>');
+      return lines.join("");
+    }
+    if (f.kind === "hreflang-link") {
+      var L = f.link;
+      var hlines = [];
+      hlines.push('<div class="row-line"><code>&lt;' + esc(L.tag) + ' href="' + esc(L.href.length > 60 ? L.href.slice(0,60) + "…" : L.href) + '"&gt;</code> "' + esc(L.linkText) + '"</div>');
+      hlines.push('<div class="row-line"><strong>hreflang:</strong> ' + tagValueHtml(L.hreflang) + '</div>');
+      (L.hreflang.issues || []).forEach(function (iss) { hlines.push('<div class="issuetext">' + esc(iss) + '</div>'); });
+      (L.hreflang.warnings || []).forEach(function (w) { hlines.push('<div class="warntext">' + esc(w) + '</div>'); });
+      hlines.push('<div class="src">' + esc(L.selector) + '</div>');
+      return hlines.join("");
+    }
+    if (f.kind === "foreign-url") {
+      var F = f.link;
+      var flines = [];
+      flines.push('<div class="row-line"><code>&lt;a href="' + esc(F.href.length > 60 ? F.href.slice(0,60) + "…" : F.href) + '"&gt;</code> "' + esc(F.linkText) + '"</div>');
+      flines.push('<div class="warntext">URL ' + F.hint.source + ' suggests <span class="swatch">' + esc(F.hint.code) + '</span> content (different from page lang). ' + (F.existingHreflang ? 'hreflang="' + esc(F.existingHreflang) + '" is set but does not match this hint.' : 'No hreflang attribute set.') + ' WCAG 3.1.2 risk — verify the linked document\'s actual language.</div>');
+      flines.push('<div class="src">' + esc(F.selector) + '</div>');
+      return flines.join("");
+    }
+    if (f.kind === "embedded-lang") {
+      var E = f.embedded;
+      var elines = [];
+      elines.push('<div class="row-line"><code>&lt;' + esc(E.tag) + '&gt;</code> @ <code>' + esc(E.attr) + '</code></div>');
+      elines.push('<div class="row-line"><span class="tagvalue">' + esc(E.value) + '</span></div>');
+      (E.issues || []).forEach(function (iss) {
+        var cls = iss.severity === "error" ? "issuetext" : "warntext";
+        elines.push('<div class="' + cls + '">' + esc(iss.text) + '</div>');
+      });
+      elines.push('<div class="src">' + esc(E.selector) + '</div>');
+      return elines.join("");
+    }
+    return "";
+  }
+
+  function statusChipFor(f) {
+    if (f.kind === "page-title") {
+      var t = f.title;
+      if (t.issues.some(function (i) { return i.severity === "error"; })) return { cls: "err", label: "fail" };
+      if (t.issues.length) return { cls: "warn", label: "warn" };
+      return { cls: "ok", label: "ok" };
+    }
+    if (f.kind === "html-lang") {
+      if (!f.tag.present || !f.tag.valid) return { cls: "err", label: "fail" };
+      if (f.tag.issues && f.tag.issues.length) return { cls: "warn", label: "warn" };
+      if (f.tag.warnings && f.tag.warnings.length) return { cls: "warn", label: "warn" };
+      return { cls: "ok", label: "ok" };
+    }
+    if (f.kind === "html-xml-lang") {
+      if (!f.tag.valid) return { cls: "err", label: "fail" };
+      if (f.tag.issues && f.tag.issues.length) return { cls: "warn", label: "warn" };
+      if (f.tag.warnings && f.tag.warnings.length) return { cls: "warn", label: "warn" };
+      return { cls: "ok", label: "ok" };
+    }
+    if (f.kind === "html-lang-xml-mismatch") return { cls: "err", label: "mismatch" };
+    if (f.kind === "element-lang") {
+      var hasErr = false, hasWarn = false;
+      var checks = [f.attr.lang, f.attr.xmlLang];
+      checks.forEach(function (c) {
+        if (!c) return;
+        if (!c.valid) hasErr = true;
+        if (c.issues && c.issues.length) hasErr = true;
+        if (c.warnings && c.warnings.length) hasWarn = true;
+      });
+      if (f.attr.issues && f.attr.issues.some(function (i) { return i.severity === "error"; })) hasErr = true;
+      if (f.attr.issues && f.attr.issues.some(function (i) { return i.severity === "warn"; })) hasWarn = true;
+      if (hasErr) return { cls: "err", label: "fail" };
+      if (hasWarn) return { cls: "warn", label: "warn" };
+      return { cls: "ok", label: "ok" };
+    }
+    if (f.kind === "hreflang-link") {
+      if (!f.link.hreflang.valid) return { cls: "err", label: "fail" };
+      if (f.link.hreflang.issues && f.link.hreflang.issues.length) return { cls: "warn", label: "warn" };
+      if (f.link.hreflang.warnings && f.link.hreflang.warnings.length) return { cls: "warn", label: "warn" };
+      return { cls: "ok", label: "ok" };
+    }
+    if (f.kind === "foreign-url") return { cls: "warn", label: "review" };
+    if (f.kind === "embedded-lang") return { cls: "warn", label: "warn" };
+    return { cls: "info", label: "info" };
+  }
+
+  var list = panelEl.querySelector("#" + P + "list");
+  findings.forEach(function (f) {
+    var li = document.createElement("li");
+    li.classList.add("cat-" + f.category);
+    var chip = statusChipFor(f);
+    if (chip.cls === "err") li.classList.add("has-issue");
+    else if (chip.cls === "warn") li.classList.add("has-warn");
+    else if (chip.cls === "ok") li.classList.add("ok-row");
+
+    var location = f.isTop ? "" : '<span class="frame-label">[' + esc(f.frameLabel || f.frameUrl) + ']</span>';
+    var categoryLabel = ({
+      "title": "Title",
+      "page-lang": "Page lang",
+      "lang-attr": "Lang attr",
+      "hreflang": "hreflang",
+      "foreign-url": "Foreign URL",
+      "embedded": "Embedded"
+    })[f.category] || f.category;
+
+    li.innerHTML =
+      '<div class="meta">' +
+        '<span style="color:#999">#' + f.index + '</span>' +
+        '<span class="catchip">' + esc(categoryLabel) + '</span>' +
+        '<span class="statuschip ' + chip.cls + '">' + esc(chip.label) + '</span>' +
+        location +
+      "</div>" +
+      '<div class="body">' + renderFindingBody(f) + "</div>";
+
+    list.appendChild(li);
+  });
+
+  shadow.appendChild(panelEl);
+
+  /* ----- Markdown ----- */
+
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  var md = "| # | Frame | Category | Status | Details |\n";
+  md += "|---|-------|----------|--------|---------|\n";
+  findings.forEach(function (f) {
+    var chip = statusChipFor(f);
+    var frameLabel = f.isTop ? "(top)" : mdEsc(f.frameLabel || f.frameUrl);
+    var details = "";
+    if (f.kind === "page-title") {
+      details = (f.title.value ? '"' + mdEsc(f.title.value) + '"' : "*(empty)*");
+      if (f.title.issues.length) details += " — " + f.title.issues.map(function (i) { return mdEsc(i.text); }).join("; ");
+    } else if (f.kind === "html-lang" || f.kind === "html-xml-lang") {
+      var loc = f.kind === "html-lang" ? "html lang" : "html xml:lang";
+      details = loc + "=";
+      details += f.tag.present ? '`"' + mdEsc(f.tag.raw) + '"`' : "*(absent)*";
+      if (f.tag.canonical && f.tag.canonical !== f.tag.raw) details += " → canonical `" + mdEsc(f.tag.canonical) + "`";
+      if (f.tag.issues && f.tag.issues.length) details += " ⚠ " + f.tag.issues.map(mdEsc).join("; ");
+      if (f.tag.warnings && f.tag.warnings.length) details += " · " + f.tag.warnings.map(mdEsc).join("; ");
+    } else if (f.kind === "html-lang-xml-mismatch") {
+      details = mdEsc(f.mismatch.text);
+    } else if (f.kind === "element-lang") {
+      var a = f.attr;
+      details = "<" + a.tag + ">";
+      if (a.lang) details += " lang=`\"" + mdEsc(a.lang.raw) + "\"`";
+      if (a.xmlLang) details += " xml:lang=`\"" + mdEsc(a.xmlLang.raw) + "\"`";
+      var msgs = [];
+      [a.lang, a.xmlLang].forEach(function (c) {
+        if (!c) return;
+        if (c.issues) msgs = msgs.concat(c.issues);
+        if (c.warnings) msgs = msgs.concat(c.warnings);
+      });
+      (a.issues || []).forEach(function (i) { msgs.push(i.text); });
+      if (msgs.length) details += " — " + msgs.map(mdEsc).join("; ");
+      details += " · `" + mdEsc(a.selector) + "`";
+    } else if (f.kind === "hreflang-link") {
+      var L = f.link;
+      details = "<" + L.tag + ' href="' + mdEsc(L.href.length > 60 ? L.href.slice(0,60) + "…" : L.href) + '"> hreflang=`"' + mdEsc(L.hreflang.raw) + '"`';
+      if (L.hreflang.issues && L.hreflang.issues.length) details += " ⚠ " + L.hreflang.issues.map(mdEsc).join("; ");
+      if (L.hreflang.warnings && L.hreflang.warnings.length) details += " · " + L.hreflang.warnings.map(mdEsc).join("; ");
+    } else if (f.kind === "foreign-url") {
+      var F2 = f.link;
+      details = '<a href="' + mdEsc(F2.href.length > 60 ? F2.href.slice(0,60) + "…" : F2.href) + '"> URL ' + F2.hint.source + ' suggests `' + mdEsc(F2.hint.code) + '`. ' + (F2.existingHreflang ? "Has hreflang=`\"" + mdEsc(F2.existingHreflang) + "\"`" : "No hreflang") + ".";
+    } else if (f.kind === "embedded-lang") {
+      var E2 = f.embedded;
+      details = "<" + E2.tag + "> @ " + E2.attr + "=`" + mdEsc(E2.value) + "`";
+      if (E2.issues && E2.issues.length) details += " ⚠ " + E2.issues.map(function (i) { return mdEsc(i.text); }).join("; ");
+    }
+    md += "| " + f.index + " | " + frameLabel + " | " + f.category + " | " + chip.label + " | " + details + " |\n";
+  });
+
+  /* ----- Console ----- */
+
+  console.group("%c[a11yn document] " + findings.length + " findings (" + totalIssues + " with issues)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(findings.map(function (f) {
+    var chip = statusChipFor(f);
+    return {
+      "#": f.index,
+      frame: f.isTop ? "(top)" : (f.frameLabel || f.frameUrl),
+      category: f.category,
+      status: chip.label
+    };
+  }));
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  /* ----- Wire filter bar ----- */
+
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+
+  /* ----- Drag-by-header ----- */
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
     delete window[P + "cleanup"];
     delete window[P + "active"];
     console.log("%c[a11yn] cleared.", "color:#003876");

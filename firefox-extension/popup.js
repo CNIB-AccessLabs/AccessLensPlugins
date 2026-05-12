@@ -14,7 +14,9 @@ const CHECK_LABELS = {
   landmarks: "Landmarks",
   images: "Images",
   links: "Link Text",
-  aria: "ARIA Validation"
+  aria: "ARIA Validation",
+  contrast: "Colour Contrast",
+  document: "Title & Language"
 };
 
 async function getActiveTab() {

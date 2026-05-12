@@ -49,6 +49,18 @@
       </button>
       <p class="desc">Validates every role and aria-* attribute on the page. Flags unknown role values, abstract roles, unknown aria-* names (with "did you mean" suggestions), broken aria-labelledby/describedby/controls/owns ID refs, invalid boolean values, missing required attributes per role, and role="presentation"/"none" on focusable elements.</p>
     </li>
+    <li>
+      <button class="check" data-check="contrast">
+        <span class="label">Colour Contrast</span>
+      </button>
+      <p class="desc">Text colour vs background contrast against WCAG 1.4.3 AA (4.5:1 normal, 3:1 large). Composites semi-transparent backgrounds, detects gradients/images/animations/overflow/z-index stacking and surfaces them as caveats. Cannot-calculate cases flagged for manual review. Limitations vs auto_a11y are listed in the panel.</p>
+    </li>
+    <li>
+      <button class="check" data-check="document">
+        <span class="label">Title &amp; Language</span>
+      </button>
+      <p class="desc">WCAG 2.4.2 (Page Titled), 3.1.1 (Language of Page), 3.1.2 (Language of Parts). Page title presence/quality, full inventory of every lang and xml:lang attribute with BCP 47 structural + case-canonical + value validation (region affects screen-reader dialect), lang/xml:lang cross-element mismatch detection, hreflang validation on links, URL-language-hint detection on foreign links, and the "lang= embedded in alt/aria-label" smell check.</p>
+    </li>
   </ul>
 </section>
 <footer>
