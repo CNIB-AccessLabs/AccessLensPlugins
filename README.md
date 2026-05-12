@@ -18,9 +18,9 @@ For a deeper read on the algorithm and architecture, see [`docs/ACCESSIBLE_NAME_
 
 **Bookmarklet (30 seconds):** Open [`bookmarklet/a11y-names.html`](./bookmarklet/a11y-names.html) in your browser, drag the **a11y: names** button to your bookmarks bar, then click it on any page you want to inspect.
 
-**Firefox extension (1 minute):** Go to `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on**, point at [`firefox-extension/manifest.json`](./firefox-extension/manifest.json). Press **Alt+A** to scan.
+**Firefox extension (1 minute):** Go to `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on**, point at [`firefox-extension/manifest.json`](./firefox-extension/manifest.json). Click the toolbar icon to open the inspector menu.
 
-**Chrome / Edge / Brave extension (1 minute):** Go to `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, select the [`chrome-extension`](./chrome-extension) folder. Press **Alt+A** to scan.
+**Chrome / Edge / Brave extension (1 minute):** Go to `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, select the [`chrome-extension`](./chrome-extension) folder. Click the toolbar icon to open the inspector menu.
 
 ## What it shows you
 

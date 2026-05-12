@@ -29,31 +29,5 @@
   },
   "background": {
     "service_worker": "background.js"
-  },
-  "commands": {
-    "run-names": {
-      "suggested_key": {
-        "default": "Alt+A"
-      },
-      "description": "Scan accessible names"
-    },
-    "run-headings": {
-      "suggested_key": {
-        "default": "Alt+H"
-      },
-      "description": "Inspect heading structure"
-    },
-    "run-landmarks": {
-      "suggested_key": {
-        "default": "Alt+L"
-      },
-      "description": "Inspect landmarks / page regions"
-    },
-    "run-images": {
-      "suggested_key": {
-        "default": "Alt+I"
-      },
-      "description": "Inspect image alt text"
-    }
   }
 }

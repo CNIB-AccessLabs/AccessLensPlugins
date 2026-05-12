@@ -16,30 +16,38 @@
     <li>
       <button class="check" data-check="names">
         <span class="label">Accessible Names</span>
-        <span class="key">Alt+A</span>
       </button>
       <p class="desc">Reports the computed accessible name of every interactive element.</p>
     </li>
     <li>
       <button class="check" data-check="headings">
         <span class="label">Headings</span>
-        <span class="key">Alt+H</span>
       </button>
       <p class="desc">Heading tree: levels, numbers, skipped levels, empty headings, multiple h1, role="heading" issues.</p>
     </li>
     <li>
       <button class="check" data-check="landmarks">
         <span class="label">Landmarks</span>
-        <span class="key">Alt+L</span>
       </button>
       <p class="desc">Page-region landmarks (banner, nav, main, complementary, contentinfo, region, search, form) with names. Flags multiple main, unnamed regions, and same-role landmarks needing distinct names.</p>
     </li>
     <li>
       <button class="check" data-check="images">
         <span class="label">Images</span>
-        <span class="key">Alt+I</span>
       </button>
       <p class="desc">All image-like elements (img, svg, role="img", input type="image", area) classified as labeled, decorative, missing alt, or suspicious alt (filename-looking, generic single word, redundant "image of …" prefix).</p>
+    </li>
+    <li>
+      <button class="check" data-check="links">
+        <span class="label">Link Text</span>
+      </button>
+      <p class="desc">Link text quality per WCAG 2.4.4 / 2.4.9. Flags empty links, generic phrases ("click here", "read more"), URL-as-text, and cross-link clusters where the same text points to different destinations or vice versa.</p>
+    </li>
+    <li>
+      <button class="check" data-check="aria">
+        <span class="label">ARIA Validation</span>
+      </button>
+      <p class="desc">Validates every role and aria-* attribute on the page. Flags unknown role values, abstract roles, unknown aria-* names (with "did you mean" suggestions), broken aria-labelledby/describedby/controls/owns ID refs, invalid boolean values, missing required attributes per role, and role="presentation"/"none" on focusable elements.</p>
     </li>
   </ul>
 </section>

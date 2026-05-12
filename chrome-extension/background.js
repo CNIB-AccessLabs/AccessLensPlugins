@@ -3,7 +3,6 @@
  *
  * Multi-check accessibility inspector. The toolbar button opens popup.html;
  * the popup lets the user pick a check to run, or close the active one.
- * Keyboard shortcuts (Alt+A for names, Alt+H for headings) skip the popup.
  *
  * Each check is a pair of self-contained functions:
  *
@@ -24,7 +23,9 @@ const CHECKS = {
   names:     { label: "Accessible Names", scan: scanNames,     display: displayNames     },
   headings:  { label: "Headings",         scan: scanHeadings,  display: displayHeadings  },
   landmarks: { label: "Landmarks",        scan: scanLandmarks, display: displayLandmarks },
-  images:    { label: "Images",           scan: scanImages,    display: displayImages    }
+  images:    { label: "Images",           scan: scanImages,    display: displayImages    },
+  links:     { label: "Link Text",        scan: scanLinks,     display: displayLinks     },
+  aria:      { label: "ARIA Validation",  scan: scanAria,      display: displayAria      }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -42,19 +43,6 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async response
   }
   return false;
-});
-
-api.commands.onCommand.addListener(async (cmd) => {
-  try {
-    const tabs = await api.tabs.query({ active: true, currentWindow: true });
-    if (!tabs[0] || tabs[0].id == null) return;
-    if (cmd === "run-names")     await runCheck(tabs[0].id, "names");
-    if (cmd === "run-headings")  await runCheck(tabs[0].id, "headings");
-    if (cmd === "run-landmarks") await runCheck(tabs[0].id, "landmarks");
-    if (cmd === "run-images")    await runCheck(tabs[0].id, "images");
-  } catch (e) {
-    console.error("[a11yn] command failed:", e);
-  }
 });
 
 async function runCheck(tabId, checkId) {
@@ -2229,6 +2217,1609 @@ function displayImages(framesData, checkId) {
   shadow.appendChild(panelEl);
 
   // Drag-by-header (same pattern as other checks)
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allResults.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+}
+
+/* ====================================================================
+ * CHECK: LINKS — link text quality inspector
+ *
+ * Reports every <a href> link and every element with role="link",
+ * classifying each by the quality of its accessible name. Per WCAG 2.4.4
+ * (Link Purpose in Context) and 2.4.9 (Link Purpose, Link Only), link
+ * text should describe its destination.
+ *
+ * Per-link status (worst-case wins):
+ *
+ *   ok           name is descriptive and unique to its destination
+ *   empty        no accessible name at all
+ *   generic      name is one of a list of well-known generic phrases
+ *                ("click here", "more", "read more", "learn more", …)
+ *   url-as-text  the visible text is the link's URL — AT will read out
+ *                the whole URL letter by letter, useless
+ *   ambiguous    one of two cross-link problems:
+ *                  - same text → different href (AT reads the same name
+ *                    for two destinations; user can't pick)
+ *                  - same href → different text (less critical but
+ *                    inconsistent; reported for awareness)
+ *
+ * The cross-link clusters are surfaced via the `related` field on each
+ * issue so the panel shows "(also: #3, #7)" and the Markdown table shows
+ * the related selectors.
+ * ==================================================================== */
+
+function scanLinks() {
+  "use strict";
+  try {
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        if (!win) return false;
+        var st = win.getComputedStyle(el);
+        return st.display === "none" || st.visibility === "hidden";
+      } catch (e) { return false; }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    // Same name algorithm as the Names check (common path of accname-1.2),
+    // simplified to what links use.
+    function nameFromContent(el, seen) {
+      if (!el || seen.has(el)) return "";
+      seen.add(el);
+      var parts = [];
+      for (var n = el.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType === 3) parts.push(n.nodeValue);
+        else if (n.nodeType === 1) {
+          if (isHidden(n)) continue;
+          var aLab = n.getAttribute && n.getAttribute("aria-labelledby");
+          if (aLab) { parts.push(refNames(aLab, n, seen)); continue; }
+          var aL = n.getAttribute && n.getAttribute("aria-label");
+          if (aL && aL.trim()) { parts.push(aL); continue; }
+          if (n.tagName === "IMG") { var alt = n.getAttribute("alt"); if (alt) parts.push(alt); continue; }
+          parts.push(nameFromContent(n, seen));
+        }
+      }
+      return txt(parts.join(" "));
+    }
+
+    function refNames(idrefs, contextEl, seen) {
+      var doc = contextEl.ownerDocument || document;
+      var root = contextEl.getRootNode ? contextEl.getRootNode() : doc;
+      return idrefs.split(/\s+/).map(function (id) {
+        var ref = (root.getElementById && root.getElementById(id)) || doc.getElementById(id);
+        if (!ref) return "";
+        var aL = ref.getAttribute("aria-label");
+        if (aL && aL.trim()) return aL.trim();
+        return nameFromContent(ref, seen);
+      }).filter(Boolean).join(" ");
+    }
+
+    function linkAccName(el) {
+      var seen = new Set();
+      var aLab = el.getAttribute("aria-labelledby");
+      if (aLab) { var n1 = refNames(aLab, el, seen); if (n1) return { name: n1, src: "aria-labelledby" }; }
+      var aL = el.getAttribute("aria-label");
+      if (aL && aL.trim()) return { name: aL.trim(), src: "aria-label" };
+      var n2 = nameFromContent(el, seen);
+      if (n2) return { name: n2, src: "subtree text" };
+      var ti = el.getAttribute("title");
+      if (ti && ti.trim()) return { name: ti.trim(), src: "title" };
+      return { name: "", src: "" };
+    }
+
+    // Known generic phrases. Matched case-insensitively against the FULL
+    // trimmed accessible name (so "Read more about quantum physics" doesn't
+    // trip — only literally "read more" does).
+    var GENERIC_PHRASES = [
+      "click here", "click", "here", "more", "read more", "more...",
+      "learn more", "see more", "show more", "view more", "view all",
+      "details", "info", "more info", "more information",
+      "this", "this link", "link", "this page",
+      "go", "continue", "next", "previous", "back",
+      "open", "view", "read", "read on", "submit"
+    ];
+    var GENERIC_SET = new Set(GENERIC_PHRASES.map(function (s) { return s.toLowerCase(); }));
+
+    function isGenericText(name) {
+      if (!name) return false;
+      return GENERIC_SET.has(name.trim().toLowerCase());
+    }
+
+    function classifyHref(href) {
+      if (!href) return "none";
+      var h = href.trim().toLowerCase();
+      if (h === "" || h === "#") return "empty-hash";
+      if (h.indexOf("#") === 0) return "hash";
+      if (h.indexOf("javascript:") === 0) return "javascript";
+      if (h.indexOf("mailto:") === 0) return "mailto";
+      if (h.indexOf("tel:") === 0) return "tel";
+      if (h.indexOf("http") === 0 || h.indexOf("//") === 0 || h.indexOf("/") === 0) return "http";
+      return "other";
+    }
+
+    function looksLikeUrl(s) {
+      if (!s) return false;
+      var t = s.trim();
+      // Bare URL forms: starts with http://, https://, www., or contains :// in middle
+      return /^(https?:\/\/|www\.)/i.test(t) || /:\/\//.test(t);
+    }
+
+    var SELECTOR = "a[href], [role=\"link\"]";
+
+    var results = [];
+    var seenEls = new Set();
+    var shadowRoots = 0;
+
+    function walk(root) {
+      var matches;
+      try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
+      Array.prototype.forEach.call(matches, function (el) {
+        if (seenEls.has(el)) return;
+        seenEls.add(el);
+        if (isHidden(el)) return;
+        var r;
+        try { r = el.getBoundingClientRect(); } catch (e) { return; }
+        if (r.width === 0 && r.height === 0) return;
+
+        var tag = el.tagName.toLowerCase();
+        var href = el.getAttribute("href");
+        var hrefKind = classifyHref(href);
+        var an = linkAccName(el);
+        var nameLower = (an.name || "").trim().toLowerCase();
+
+        results.push({
+          tag: tag,
+          role: el.getAttribute("role") || (tag === "a" ? "link" : null),
+          href: href || "",
+          hrefKind: hrefKind,
+          name: an.name,
+          nameSrc: an.src,
+          nameLower: nameLower,
+          isEmpty: !an.name,
+          isGeneric: isGenericText(an.name),
+          isUrlAsText: !!an.name && looksLikeUrl(an.name) && classifyHref(an.name) !== "none",
+          selector: uniqueSelector(el),
+          rect: { top: r.top, left: r.left, width: r.width, height: r.height }
+        });
+      });
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      Array.prototype.forEach.call(all, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document);
+
+    results.sort(function (a, b) {
+      if (a.rect.top !== b.rect.top) return a.rect.top - b.rect.top;
+      return a.rect.left - b.rect.left;
+    });
+
+    return { url: window.location.href, isTop: window === window.top, results: results, shadowRoots: shadowRoots };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
+  }
+}
+
+function displayLinks(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  var allResults = [];
+  var unmatchedFrames = 0;
+  var frameLabelByUrl = new Map();
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    if (!frame.results || !frame.results.length) return;
+    var offX = 0, offY = 0, positioned = true, inFrame = !frame.isTop;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    frame.results.forEach(function (r) {
+      allResults.push({
+        tag: r.tag, role: r.role,
+        href: r.href, hrefKind: r.hrefKind,
+        name: r.name, nameSrc: r.nameSrc, nameLower: r.nameLower,
+        isEmpty: r.isEmpty, isGeneric: r.isGeneric, isUrlAsText: r.isUrlAsText,
+        selector: r.selector,
+        frameUrl: frame.url,
+        frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
+        isTop: !inFrame,
+        pageTop: window.scrollY + offY + r.rect.top,
+        pageLeft: window.scrollX + offX + r.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      });
+    });
+  });
+  allResults.forEach(function (r, i) { r.index = i + 1; });
+
+  // Cross-link clustering:
+  //   sameTextDifferentHref: links with identical (lowercased) name but
+  //                          different href values
+  //   sameHrefDifferentText: links with identical href but different names
+  //
+  // Both clusters reference the OTHER members so each row tells the auditor
+  // about its full set.
+  var byNameLower = new Map(); // name → array of links
+  var byHref = new Map();      // href (normalized) → array of links
+  allResults.forEach(function (r) {
+    if (r.nameLower) {
+      if (!byNameLower.has(r.nameLower)) byNameLower.set(r.nameLower, []);
+      byNameLower.get(r.nameLower).push(r);
+    }
+    if (r.href) {
+      var key = r.href.trim();
+      if (!byHref.has(key)) byHref.set(key, []);
+      byHref.get(key).push(r);
+    }
+  });
+
+  allResults.forEach(function (r) {
+    r.issues = [];
+
+    if (r.isEmpty) {
+      r.issues.push({ text: "no accessible name (empty link)", related: [] });
+    }
+    if (r.isGeneric) {
+      r.issues.push({
+        text: 'generic link text "' + r.name + '" — describe the destination',
+        related: []
+      });
+    }
+    if (r.isUrlAsText) {
+      r.issues.push({
+        text: "link text is the URL — AT will read it character by character; use descriptive text",
+        related: []
+      });
+    }
+
+    // Cluster checks — only flag when the cluster's name/href is meaningful.
+    if (r.nameLower) {
+      var sameNameGroup = byNameLower.get(r.nameLower);
+      if (sameNameGroup.length > 1) {
+        var differentHref = sameNameGroup.filter(function (o) {
+          return o.index !== r.index && o.href !== r.href;
+        });
+        if (differentHref.length) {
+          r.issues.push({
+            text: 'same link text "' + r.name + '" used for different destinations — AT cannot distinguish them',
+            related: differentHref.map(function (o) { return o.index; })
+          });
+        }
+      }
+    }
+    if (r.href && r.href.trim() && r.hrefKind === "http") {
+      var sameHrefGroup = byHref.get(r.href.trim());
+      if (sameHrefGroup && sameHrefGroup.length > 1) {
+        var differentText = sameHrefGroup.filter(function (o) {
+          return o.index !== r.index && o.nameLower !== r.nameLower;
+        });
+        if (differentText.length) {
+          r.issues.push({
+            text: "same destination but described with different text — pick one consistent name",
+            related: differentText.map(function (o) { return o.index; })
+          });
+        }
+      }
+    }
+  });
+
+  // Derive status (worst-case wins). Drives chip colour.
+  allResults.forEach(function (r) {
+    if (r.isEmpty) r.status = "empty";
+    else if (r.isUrlAsText) r.status = "url-as-text";
+    else if (r.isGeneric) r.status = "generic";
+    else if (r.issues.some(function (i) { return /different destinations/.test(i.text); })) r.status = "ambiguous";
+    else if (r.issues.some(function (i) { return /different text/.test(i.text); })) r.status = "inconsistent";
+    else r.status = "ok";
+  });
+
+  function fmtIssuePanel(issue) {
+    if (!issue.related || !issue.related.length) return issue.text;
+    return issue.text + " (also: " + issue.related.map(function (i) { return "#" + i; }).join(", ") + ")";
+  }
+  function fmtIssueMd(issue) {
+    if (!issue.related || !issue.related.length) return mdEsc(issue.text);
+    var refs = issue.related.map(function (i) {
+      var other = allResults[i - 1];
+      return "#" + i + " `" + mdEsc(other ? other.selector : "") + "`";
+    });
+    return mdEsc(issue.text) + " (also: " + refs.join(", ") + ")";
+  }
+
+  // Resolve element refs for outline + click-to-scroll
+  allResults.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var color, style;
+        if (r.status === "empty") { color = "#b00020"; style = "dashed"; }
+        else if (r.status === "generic" || r.status === "url-as-text" || r.status === "ambiguous") { color = "#b45309"; style = "dashed"; }
+        else if (r.status === "inconsistent") { color = "#b45309"; style = "dotted"; }
+        else { color = "#003876"; style = "solid"; }
+        el.style.setProperty("outline", "2px " + style + " " + color, "important");
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  // Shadow UI host
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var STATUS_COLORS = {
+    ok:           "#003876",
+    empty:        "#b00020",
+    generic:      "#b45309",
+    "url-as-text":"#b45309",
+    ambiguous:    "#b45309",
+    inconsistent: "#7a4a09"
+  };
+  var STATUS_LABELS = {
+    ok:           "ok",
+    empty:        "EMPTY",
+    generic:      "generic",
+    "url-as-text":"url-as-text",
+    ambiguous:    "ambiguous",
+    inconsistent: "inconsistent"
+  };
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:520px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;display:flex;align-items:flex-start;gap:10px;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li .gutter{flex:0 0 auto;width:22px;color:#999;font-size:14px;text-align:right;}" +
+    ".panel li .statuschip{flex:0 0 auto;display:inline-block;min-width:100px;text-align:center;padding:4px 8px;border-radius:3px;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;}" +
+    ".panel li .body{flex:1 1 auto;min-width:0;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .name{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
+    ".panel li .name.no-name{color:#666;font-style:italic;font-weight:400 !important;}" +
+    ".panel li .href{color:#0a5d2e;font-size:13px;margin-top:2px;word-break:break-all;}" +
+    ".panel li .issues{color:#b00020;font-size:14px;margin-top:4px;font-weight:600 !important;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:2px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  // Badges
+  var badges = [];
+  allResults.forEach(function (r) {
+    if (!r.positioned) return;
+    var badge = document.createElement("div");
+    var cls = "badge";
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    badge.style.background = STATUS_COLORS[r.status] || "#003876";
+    var prefix = r.isTop ? "" : "[frame] ";
+    var label = STATUS_LABELS[r.status] || r.status;
+    var summary = r.name || "(empty)";
+    badge.textContent = "#" + r.index + " " + prefix + "link " + label + ": " + summary;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  // Markdown
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  function truncHref(s) {
+    if (!s) return "";
+    if (s.length <= 60) return s;
+    return s.slice(0, 28) + "…" + s.slice(-28);
+  }
+  var md = "| # | Frame | Status | Accessible Name | Source | href | Issues | Selector |\n";
+  md += "|---|-------|--------|-----------------|--------|------|--------|----------|\n";
+  allResults.forEach(function (r) {
+    var name = r.name ? mdEsc(r.name) : "*(empty)*";
+    var issues = r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    md += "| " + r.index + " | " + frameLabel + " | " + r.status + " | " + name + " | " + (r.nameSrc || "") + " | `" + mdEsc(truncHref(r.href)) + "` | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  // Tallies
+  var counts = { ok: 0, empty: 0, generic: 0, "url-as-text": 0, ambiguous: 0, inconsistent: 0 };
+  allResults.forEach(function (r) { counts[r.status] = (counts[r.status] || 0) + 1; });
+  var frameCount = framesData.filter(function (f) { return !f.isTop && f.results && f.results.length; }).length;
+  var problemCount = allResults.length - counts.ok;
+
+  console.group("%c[a11yn links] " + allResults.length + " links (" + problemCount + " with issues) — top doc + " + frameCount + " frame(s)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allResults.map(function (r) {
+    return {
+      "#": r.index,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      status: r.status,
+      name: r.name || "(empty)",
+      href: r.href,
+      issues: r.issues.map(fmtIssuePanel).join("; ")
+    };
+  }));
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel";
+
+  var summary = "";
+  if (allResults.length === 0) {
+    summary += '<span class="warn">No links found.</span>';
+  } else if (problemCount === 0) {
+    summary += '<span class="ok">All ' + allResults.length + ' links look good.</span>';
+  } else {
+    var bits = [];
+    if (counts.empty)         bits.push(counts.empty + " empty");
+    if (counts.generic)       bits.push(counts.generic + " generic");
+    if (counts["url-as-text"]) bits.push(counts["url-as-text"] + " url-as-text");
+    if (counts.ambiguous)     bits.push(counts.ambiguous + " ambiguous (same text, diff dest)");
+    if (counts.inconsistent)  bits.push(counts.inconsistent + " inconsistent (same dest, diff text)");
+    summary += '<span class="miss">' + bits.join(", ") + " of " + allResults.length + " links.</span>";
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
+  summary += counts.ok + " ok · top doc";
+  if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
+  if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
+  summary += "</div>";
+
+  panelEl.innerHTML =
+    "<header><strong>Links (" + allResults.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<ol id="' + P + 'list"></ol>';
+
+  var list = panelEl.querySelector("#" + P + "list");
+  allResults.forEach(function (r) {
+    var li = document.createElement("li");
+    var chipColor = STATUS_COLORS[r.status] || "#003876";
+    var chipLabel = STATUS_LABELS[r.status] || r.status;
+    var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+    var elemTag = r.tag + (r.role && r.role !== "link" ? ' [role="' + esc(r.role) + '"]' : "");
+
+    var nameHtml;
+    if (r.name) {
+      nameHtml = '<div class="name">' + esc(r.name) + (r.nameSrc ? ' <span style="color:#999;font-weight:400;font-size:14px">via ' + esc(r.nameSrc) + "</span>" : "") + "</div>";
+    } else {
+      nameHtml = '<div class="name no-name">(empty link)</div>';
+    }
+
+    var hrefHtml = r.href ? '<div class="href">→ ' + esc(truncHref(r.href)) + "</div>" : "";
+
+    li.innerHTML =
+      '<span class="gutter">' + r.index + "</span>" +
+      '<span class="statuschip" style="background:' + chipColor + '">' + esc(chipLabel) + "</span>" +
+      '<div class="body">' +
+        '<div class="meta">' + location + "<code>&lt;" + esc(elemTag) + "&gt;</code></div>" +
+        nameHtml +
+        hrefHtml +
+        (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.map(fmtIssuePanel).join("; ")) + "</div>" : "") +
+        '<div class="src">' + esc(r.selector) + "</div>" +
+      "</div>";
+
+    li.addEventListener("click", function () {
+      try {
+        if (r._resolveEl) {
+          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        } else if (r.iframeEl) {
+          r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (r.badge) {
+          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        }
+      } catch (e) {}
+    });
+    list.appendChild(li);
+  });
+  shadow.appendChild(panelEl);
+
+  // Drag-by-header
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allResults.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+}
+
+/* ====================================================================
+ * CHECK: ARIA — ARIA usage validator
+ *
+ * Validates every element that uses any `role` or `aria-*` attribute on
+ * the page. Reports only elements that have at least one issue, since a
+ * heavy-ARIA page can have hundreds of valid attributes and listing all
+ * of them isn't useful for auditing.
+ *
+ * Issue categories:
+ *
+ *   unknown-role          role value not in ARIA 1.2's concrete role list
+ *                         (Levenshtein-based "did you mean" suggestion)
+ *   abstract-role         role is one of ARIA's abstract roles, which
+ *                         must not be used by authors (e.g. "widget",
+ *                         "composite", "input", "landmark")
+ *   unknown-attr          aria-* attribute name not in ARIA 1.2's list
+ *                         (also gets a "did you mean" suggestion)
+ *   bad-bool              aria-* attribute requires true/false but got
+ *                         something else (e.g. aria-expanded="yes")
+ *   bad-tristate          aria-checked/aria-pressed got something other
+ *                         than true/false/mixed
+ *   bad-idref             ID-reference attribute (aria-labelledby,
+ *                         aria-describedby, aria-controls, aria-owns,
+ *                         aria-activedescendant, aria-errormessage,
+ *                         aria-details, aria-flowto) points to one or
+ *                         more IDs that don't exist in the document
+ *   missing-required      role declares a required aria-* attribute
+ *                         that isn't present (e.g. role="checkbox"
+ *                         requires aria-checked)
+ *   presentation-conflict role="presentation" or role="none" on a
+ *                         focusable element conflicts with its native
+ *                         interactive role
+ *
+ * The Levenshtein suggester returns the nearest valid token if the edit
+ * distance is ≤ 3, which catches typos but won't suggest unrelated
+ * names. Distance is computed inline (small implementation, no library).
+ * ==================================================================== */
+
+function scanAria() {
+  "use strict";
+  try {
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        if (!win) return false;
+        var st = win.getComputedStyle(el);
+        return st.display === "none" || st.visibility === "hidden";
+      } catch (e) { return false; }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    /* ----- ARIA 1.2 vocabulary tables (compact, hand-curated) ----- */
+
+    var VALID_ROLES = new Set([
+      // Document structure
+      "application", "article", "blockquote", "caption", "cell", "code", "columnheader",
+      "comment", "definition", "deletion", "directory", "document", "emphasis", "feed",
+      "figure", "generic", "group", "heading", "img", "image", "insertion", "list", "listitem",
+      "mark", "math", "meter", "none", "note", "paragraph", "presentation", "row",
+      "rowgroup", "rowheader", "separator", "strong", "subscript", "suggestion",
+      "superscript", "table", "term", "time",
+      // Widget roles
+      "alert", "alertdialog", "button", "checkbox", "combobox", "dialog", "gridcell",
+      "link", "log", "marquee", "menuitem", "menuitemcheckbox", "menuitemradio",
+      "option", "progressbar", "radio", "scrollbar", "searchbox", "slider", "spinbutton",
+      "status", "switch", "tab", "tabpanel", "textbox", "timer", "tooltip", "treeitem",
+      // Composite widget roles
+      "grid", "listbox", "menu", "menubar", "radiogroup", "tablist", "tree", "treegrid",
+      // Landmark roles
+      "banner", "complementary", "contentinfo", "form", "main", "navigation", "region", "search",
+      // DPUB-ARIA
+      "doc-abstract", "doc-acknowledgments", "doc-afterword", "doc-appendix",
+      "doc-backlink", "doc-biblioentry", "doc-bibliography", "doc-biblioref",
+      "doc-chapter", "doc-colophon", "doc-conclusion", "doc-cover", "doc-credit",
+      "doc-credits", "doc-dedication", "doc-endnote", "doc-endnotes", "doc-epigraph",
+      "doc-epilogue", "doc-errata", "doc-example", "doc-footnote", "doc-foreword",
+      "doc-glossary", "doc-glossref", "doc-index", "doc-introduction", "doc-noteref",
+      "doc-notice", "doc-pagebreak", "doc-pagelist", "doc-part", "doc-preface",
+      "doc-prologue", "doc-pullquote", "doc-qna", "doc-subtitle", "doc-tip", "doc-toc",
+      // SVG/Graphics
+      "graphics-document", "graphics-object", "graphics-symbol"
+    ]);
+
+    var ABSTRACT_ROLES = new Set([
+      "command", "composite", "input", "landmark", "range", "roletype",
+      "section", "sectionhead", "select", "structure", "widget", "window"
+    ]);
+
+    var VALID_ARIA_ATTRS = new Set([
+      "aria-activedescendant", "aria-atomic", "aria-autocomplete", "aria-braillelabel",
+      "aria-brailleroledescription", "aria-busy", "aria-checked", "aria-colcount",
+      "aria-colindex", "aria-colindextext", "aria-colspan", "aria-controls",
+      "aria-current", "aria-describedby", "aria-description", "aria-details",
+      "aria-disabled", "aria-dropeffect", "aria-errormessage", "aria-expanded",
+      "aria-flowto", "aria-grabbed", "aria-haspopup", "aria-hidden", "aria-invalid",
+      "aria-keyshortcuts", "aria-label", "aria-labelledby", "aria-level", "aria-live",
+      "aria-modal", "aria-multiline", "aria-multiselectable", "aria-orientation",
+      "aria-owns", "aria-placeholder", "aria-posinset", "aria-pressed", "aria-readonly",
+      "aria-relevant", "aria-required", "aria-roledescription", "aria-rowcount",
+      "aria-rowindex", "aria-rowindextext", "aria-rowspan", "aria-selected",
+      "aria-setsize", "aria-sort", "aria-valuemax", "aria-valuemin", "aria-valuenow",
+      "aria-valuetext"
+    ]);
+
+    var ID_REF_ATTRS = new Set([
+      "aria-labelledby", "aria-describedby", "aria-controls", "aria-details",
+      "aria-owns", "aria-flowto", "aria-activedescendant", "aria-errormessage"
+    ]);
+
+    // Strict boolean (true/false; "" / undefined also acceptable per spec for some)
+    var BOOLEAN_ATTRS = new Set([
+      "aria-atomic", "aria-busy", "aria-disabled", "aria-grabbed", "aria-hidden",
+      "aria-modal", "aria-multiline", "aria-multiselectable", "aria-readonly",
+      "aria-required", "aria-selected"
+    ]);
+    // Tristate: true/false/mixed
+    var TRISTATE_ATTRS = new Set(["aria-checked", "aria-pressed"]);
+    // aria-expanded: true/false (undefined allowed)
+    var EXPANDED_VALUES = new Set(["true", "false", ""]);
+    // aria-haspopup: false/true/menu/listbox/tree/grid/dialog
+    var HASPOPUP_VALUES = new Set(["false", "true", "menu", "listbox", "tree", "grid", "dialog", ""]);
+    // aria-current: false/true/page/step/location/date/time
+    var CURRENT_VALUES = new Set(["false", "true", "page", "step", "location", "date", "time", ""]);
+    // aria-invalid: false/true/grammar/spelling
+    var INVALID_VALUES = new Set(["false", "true", "grammar", "spelling", ""]);
+    // aria-live: off/polite/assertive
+    var LIVE_VALUES = new Set(["off", "polite", "assertive", ""]);
+    // aria-orientation: horizontal/vertical/undefined
+    var ORIENTATION_VALUES = new Set(["horizontal", "vertical", "undefined", ""]);
+    // aria-sort: ascending/descending/none/other
+    var SORT_VALUES = new Set(["ascending", "descending", "none", "other", ""]);
+    // aria-autocomplete: inline/list/both/none
+    var AUTOCOMPLETE_VALUES = new Set(["inline", "list", "both", "none", ""]);
+
+    // Only roles where a missing attribute is a real bug. We deliberately
+    // exclude roles whose "required" attributes have a sensible default:
+    //
+    //   role="checkbox" / "radio" / "switch"  — aria-checked defaults to false
+    //   role="combobox"                       — aria-expanded defaults to false
+    //
+    // For those, a missing attribute is functionally equivalent to the
+    // default, so flagging generates noise without surfacing a real bug.
+    //
+    // For the roles below, missing the attribute is a real problem:
+    //   - heading: aria-level defaults to 2, but if a developer reached for
+    //     role="heading" instead of <h1>..<h6> they almost certainly want a
+    //     specific level — getting silently treated as h2 is rarely intent.
+    //   - scrollbar / slider / meter: AT literally cannot describe the
+    //     control's position or value without aria-valuenow (no sensible
+    //     default — there's no "default position" for an arbitrary slider).
+    var REQUIRED_ATTRS_BY_ROLE = {
+      "heading":   ["aria-level"],
+      "scrollbar": ["aria-controls", "aria-valuenow"],
+      "slider":    ["aria-valuenow"],
+      "meter":     ["aria-valuenow"]
+    };
+
+    // Map each native HTML element/type to its implicit ARIA role. Used to
+    // flag explicit role= attributes that just duplicate what the browser
+    // already provides — e.g. <nav role="navigation"> or <button role="button">.
+    // Only the clear-cut cases are listed; native elements with
+    // context-dependent implicit roles (header/footer/section/form) are
+    // omitted to avoid false positives.
+    function implicitRoleOf(el) {
+      var tag = el.tagName.toLowerCase();
+      if (tag === "a") return el.hasAttribute("href") ? "link" : null;
+      if (tag === "button") return "button";
+      if (tag === "input") {
+        var t = (el.getAttribute("type") || "text").toLowerCase();
+        if (t === "checkbox") return "checkbox";
+        if (t === "radio") return "radio";
+        if (t === "button" || t === "submit" || t === "reset") return "button";
+        if (t === "range") return "slider";
+        if (t === "number") return "spinbutton";
+        if (t === "search") return "searchbox";
+        if (t === "text" || t === "email" || t === "tel" || t === "url") return "textbox";
+        return null;
+      }
+      if (tag === "select") return el.multiple ? "listbox" : "combobox";
+      if (tag === "textarea") return "textbox";
+      if (tag === "nav") return "navigation";
+      if (tag === "main") return "main";
+      if (tag === "aside") return "complementary";
+      if (tag === "h1" || tag === "h2" || tag === "h3" || tag === "h4" || tag === "h5" || tag === "h6") return "heading";
+      if (tag === "ul" || tag === "ol") return "list";
+      if (tag === "li") return "listitem";
+      if (tag === "table") return "table";
+      if (tag === "tr") return "row";
+      if (tag === "dialog") return "dialog";
+      if (tag === "details") return "group";
+      if (tag === "summary") return "button";
+      if (tag === "progress") return "progressbar";
+      if (tag === "fieldset") return "group";
+      if (tag === "output") return "status";
+      if (tag === "img" && el.getAttribute("alt") === "") return "presentation";
+      return null;
+    }
+
+    /* ----- helpers ----- */
+
+    function levenshtein(a, b) {
+      var m = a.length, n = b.length;
+      if (m === 0) return n;
+      if (n === 0) return m;
+      var prev = new Array(n + 1), cur = new Array(n + 1);
+      for (var j = 0; j <= n; j++) prev[j] = j;
+      for (var i = 1; i <= m; i++) {
+        cur[0] = i;
+        for (var k = 1; k <= n; k++) {
+          var cost = a.charAt(i - 1) === b.charAt(k - 1) ? 0 : 1;
+          cur[k] = Math.min(cur[k - 1] + 1, prev[k] + 1, prev[k - 1] + cost);
+        }
+        var tmp = prev; prev = cur; cur = tmp;
+      }
+      return prev[n];
+    }
+
+    function findClosest(input, validSet) {
+      if (!input) return null;
+      var best = null, bestDist = 4;
+      validSet.forEach(function (item) {
+        var d = levenshtein(input.toLowerCase(), item.toLowerCase());
+        if (d < bestDist) { bestDist = d; best = item; }
+      });
+      return best;
+    }
+
+    function primaryRole(roleAttr) {
+      if (!roleAttr) return null;
+      var tokens = roleAttr.trim().split(/\s+/);
+      for (var i = 0; i < tokens.length; i++) {
+        if (VALID_ROLES.has(tokens[i])) return tokens[i];
+      }
+      return null;
+    }
+
+    function isFocusableNatively(el) {
+      var tag = el.tagName.toLowerCase();
+      if (el.hasAttribute("disabled")) return false;
+      if (tag === "a" && el.hasAttribute("href")) return true;
+      if (tag === "button" || tag === "select" || tag === "textarea") return true;
+      if (tag === "input") {
+        var t = (el.getAttribute("type") || "text").toLowerCase();
+        return t !== "hidden";
+      }
+      if (tag === "summary" || tag === "details") return true;
+      return false;
+    }
+
+    function validateElement(el) {
+      var issues = [];
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+
+      // ----- Role validation
+      var roleAttr = el.getAttribute("role");
+      if (roleAttr) {
+        var roleTokens = roleAttr.trim().split(/\s+/);
+        roleTokens.forEach(function (token) {
+          if (!token) return;
+          if (VALID_ROLES.has(token)) return;
+          if (ABSTRACT_ROLES.has(token)) {
+            issues.push({
+              text: 'abstract role "' + token + '" cannot be used by authors',
+              category: "abstract-role",
+              related: []
+            });
+          } else {
+            var suggestion = findClosest(token, VALID_ROLES);
+            issues.push({
+              text: 'unknown role "' + token + '"' + (suggestion ? ' — did you mean "' + suggestion + '"?' : ''),
+              category: "unknown-role",
+              related: []
+            });
+          }
+        });
+
+        // ----- presentation/none on focusable
+        if ((roleTokens.indexOf("presentation") !== -1 || roleTokens.indexOf("none") !== -1)) {
+          var tabidxAttr = el.getAttribute("tabindex");
+          var hasFocusTabindex = tabidxAttr !== null && tabidxAttr !== "" && parseInt(tabidxAttr, 10) >= 0;
+          if (isFocusableNatively(el) || hasFocusTabindex) {
+            issues.push({
+              text: 'role="presentation"/"none" applied to a focusable element conflicts with its native role',
+              category: "presentation-conflict",
+              related: []
+            });
+          }
+        }
+
+        // ----- redundant role (explicit role duplicates the native implicit role)
+        var implicit = implicitRoleOf(el);
+        var primaryAtThisPoint = primaryRole(roleAttr);
+        if (implicit && primaryAtThisPoint && primaryAtThisPoint === implicit) {
+          var elDesc = "<" + el.tagName.toLowerCase();
+          if (el.tagName.toLowerCase() === "input" && el.getAttribute("type")) {
+            elDesc += ' type="' + el.getAttribute("type") + '"';
+          }
+          elDesc += ">";
+          issues.push({
+            text: elDesc + ' already has implicit role "' + implicit + '" — explicit role="' + primaryAtThisPoint + '" is redundant',
+            category: "redundant-role",
+            related: []
+          });
+        }
+      }
+
+      // ----- aria-* attribute validation
+      Array.prototype.forEach.call(el.attributes, function (attr) {
+        var name = attr.name;
+        if (name.indexOf("aria-") !== 0) return;
+        var val = attr.value;
+        var valLower = val.trim().toLowerCase();
+
+        // Name validation
+        if (!VALID_ARIA_ATTRS.has(name)) {
+          var suggestion = findClosest(name, VALID_ARIA_ATTRS);
+          issues.push({
+            text: 'unknown attribute "' + name + '"' + (suggestion ? ' — did you mean "' + suggestion + '"?' : ''),
+            category: "unknown-attr",
+            related: []
+          });
+          return;
+        }
+
+        // ID-reference validation
+        if (ID_REF_ATTRS.has(name) && val.trim()) {
+          var idsToCheck = val.trim().split(/\s+/);
+          var missing = idsToCheck.filter(function (id) {
+            var ref = (root.getElementById && root.getElementById(id)) || doc.getElementById(id);
+            return !ref;
+          });
+          if (missing.length) {
+            issues.push({
+              text: name + " references nonexistent ID" + (missing.length > 1 ? "s" : "") + ": " + missing.map(function (i) { return '"' + i + '"'; }).join(", "),
+              category: "bad-idref",
+              related: []
+            });
+          }
+        }
+
+        // Value validation
+        if (BOOLEAN_ATTRS.has(name)) {
+          if (valLower !== "true" && valLower !== "false" && valLower !== "") {
+            issues.push({
+              text: name + ' should be "true" or "false" (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (TRISTATE_ATTRS.has(name)) {
+          if (valLower !== "true" && valLower !== "false" && valLower !== "mixed" && valLower !== "") {
+            issues.push({
+              text: name + ' should be "true", "false", or "mixed" (got "' + val + '")',
+              category: "bad-tristate",
+              related: []
+            });
+          }
+        } else if (name === "aria-expanded") {
+          if (!EXPANDED_VALUES.has(valLower) && valLower !== "undefined") {
+            issues.push({
+              text: 'aria-expanded should be "true" or "false" (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-haspopup") {
+          if (!HASPOPUP_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-haspopup should be one of true/false/menu/listbox/tree/grid/dialog (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-current") {
+          if (!CURRENT_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-current should be one of false/true/page/step/location/date/time (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-invalid") {
+          if (!INVALID_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-invalid should be one of false/true/grammar/spelling (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-live") {
+          if (!LIVE_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-live should be one of off/polite/assertive (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-orientation") {
+          if (!ORIENTATION_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-orientation should be horizontal or vertical (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-sort") {
+          if (!SORT_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-sort should be ascending/descending/none/other (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        } else if (name === "aria-autocomplete") {
+          if (!AUTOCOMPLETE_VALUES.has(valLower)) {
+            issues.push({
+              text: 'aria-autocomplete should be inline/list/both/none (got "' + val + '")',
+              category: "bad-bool",
+              related: []
+            });
+          }
+        }
+      });
+
+      // ----- Required attributes for primary role
+      var primary = primaryRole(roleAttr);
+      if (primary && REQUIRED_ATTRS_BY_ROLE[primary]) {
+        REQUIRED_ATTRS_BY_ROLE[primary].forEach(function (requiredAttr) {
+          if (!el.hasAttribute(requiredAttr)) {
+            issues.push({
+              text: 'role="' + primary + '" requires ' + requiredAttr,
+              category: "missing-required",
+              related: []
+            });
+          }
+        });
+      }
+
+      return { issues: issues, primaryRole: primary, roleAttr: roleAttr };
+    }
+
+    /* ----- Selector: every element with role or any aria-* attribute ----- */
+    var SELECTOR_PARTS = ["[role]"];
+    VALID_ARIA_ATTRS.forEach(function (a) { SELECTOR_PARTS.push("[" + a + "]"); });
+    var SELECTOR = SELECTOR_PARTS.join(",");
+
+    var results = [];
+    var seenEls = new Set();
+    var shadowRoots = 0;
+    var ariaElementCount = 0;
+
+    function walk(root) {
+      var matches;
+      try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
+      Array.prototype.forEach.call(matches, function (el) {
+        if (seenEls.has(el)) return;
+        seenEls.add(el);
+        if (isHidden(el)) return;
+        ariaElementCount++;
+        var validation = validateElement(el);
+        var r;
+        try { r = el.getBoundingClientRect(); } catch (e) { return; }
+        // Collect every role/aria-* attribute so the panel can show the
+        // developer's full intent on this element — useful even when nothing
+        // is wrong, because seeing the inventory tells you whether ARIA is
+        // being used appropriately, redundantly, or not enough.
+        var ariaAttrs = [];
+        Array.prototype.forEach.call(el.attributes, function (attr) {
+          if (attr.name === "role" || attr.name.indexOf("aria-") === 0) {
+            ariaAttrs.push({ name: attr.name, value: attr.value });
+          }
+        });
+        results.push({
+          tag: el.tagName.toLowerCase(),
+          roleAttr: validation.roleAttr,
+          primaryRole: validation.primaryRole,
+          implicitRole: implicitRoleOf(el),
+          ariaAttrs: ariaAttrs,
+          issues: validation.issues,
+          selector: uniqueSelector(el),
+          rect: { top: r.top, left: r.left, width: r.width, height: r.height }
+        });
+      });
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      Array.prototype.forEach.call(all, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document);
+
+    results.sort(function (a, b) {
+      if (a.rect.top !== b.rect.top) return a.rect.top - b.rect.top;
+      return a.rect.left - b.rect.left;
+    });
+
+    return {
+      url: window.location.href,
+      isTop: window === window.top,
+      results: results,
+      shadowRoots: shadowRoots,
+      ariaElementCount: ariaElementCount
+    };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
+  }
+}
+
+function displayAria(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  var allResults = [];
+  var unmatchedFrames = 0;
+  var totalAriaElements = 0;
+  var frameLabelByUrl = new Map();
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    totalAriaElements += frame.ariaElementCount || 0;
+    if (!frame.results || !frame.results.length) return;
+    var offX = 0, offY = 0, positioned = true, inFrame = !frame.isTop;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    frame.results.forEach(function (r) {
+      allResults.push({
+        tag: r.tag,
+        roleAttr: r.roleAttr, primaryRole: r.primaryRole,
+        ariaAttrs: r.ariaAttrs,
+        issues: r.issues,
+        selector: r.selector,
+        frameUrl: frame.url,
+        frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
+        isTop: !inFrame,
+        pageTop: window.scrollY + offY + r.rect.top,
+        pageLeft: window.scrollX + offX + r.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      });
+    });
+  });
+  allResults.forEach(function (r, i) { r.index = i + 1; });
+
+  function fmtIssuePanel(issue) {
+    if (!issue.related || !issue.related.length) return issue.text;
+    return issue.text + " (also: " + issue.related.map(function (i) { return "#" + i; }).join(", ") + ")";
+  }
+  function fmtIssueMd(issue) {
+    if (!issue.related || !issue.related.length) return mdEsc(issue.text);
+    var refs = issue.related.map(function (i) {
+      var other = allResults[i - 1];
+      return "#" + i + " `" + mdEsc(other ? other.selector : "") + "`";
+    });
+    return mdEsc(issue.text) + " (also: " + refs.join(", ") + ")";
+  }
+
+  // Resolve element refs for outline + click-to-scroll. Outline colour reflects
+  // status: red dashed for issues, amber dashed for redundant-role-only, thin
+  // gray for valid usage (so auditors can see the ARIA footprint at a glance).
+  allResults.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var hasError = r.issues.some(function (i) { return i.category !== "redundant-role"; });
+        var hasRedundantOnly = r.issues.length > 0 && !hasError;
+        if (hasError) {
+          el.style.setProperty("outline", "2px dashed #b00020", "important");
+        } else if (hasRedundantOnly) {
+          el.style.setProperty("outline", "2px dashed #b45309", "important");
+        } else {
+          el.style.setProperty("outline", "1px dotted #999", "important");
+        }
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  // Shadow UI host
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var CATEGORY_COLORS = {
+    "unknown-role":          "#b00020",
+    "abstract-role":         "#b00020",
+    "unknown-attr":          "#b00020",
+    "bad-bool":              "#b45309",
+    "bad-tristate":          "#b45309",
+    "bad-idref":             "#b00020",
+    "missing-required":      "#b00020",
+    "presentation-conflict": "#b45309",
+    "redundant-role":        "#b45309"
+  };
+
+  function rowStatus(r) {
+    if (r.issues.length === 0) return "ok";
+    if (r.issues.every(function (i) { return i.category === "redundant-role"; })) return "redundant";
+    return "issues";
+  }
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.issues{background:#b00020;}" +
+    ".badge.redundant{background:#b45309;}" +
+    ".badge.ok{background:#666;}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:560px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 12px;border-radius:3px;cursor:pointer;font-size:14px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;border-left:4px solid transparent;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li.status-issues{border-left-color:#b00020;}" +
+    ".panel li.status-redundant{border-left-color:#b45309;}" +
+    ".panel li.status-ok{border-left-color:#0a8043;}" +
+    ".panel.filter-issues li.status-ok,.panel.filter-issues li.status-redundant{display:none;}" +
+    ".panel.filter-redundant li.status-ok,.panel.filter-redundant li.status-issues{display:none;}" +
+    ".panel li .statuschip{flex:0 0 auto;display:inline-block;min-width:80px;text-align:center;padding:3px 8px;border-radius:3px;color:#fff !important;font-size:13px;font-weight:700 !important;line-height:1.2;margin-right:8px;}" +
+    ".panel li .statuschip.issues{background:#b00020;}" +
+    ".panel li .statuschip.redundant{background:#b45309;}" +
+    ".panel li .statuschip.ok{background:#0a8043;}" +
+    ".panel li .row{display:flex;align-items:center;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;flex:1 1 auto;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .attrs{margin-top:4px;font-size:14px;display:flex;flex-wrap:wrap;gap:6px;}" +
+    ".panel li .attrchip{background:rgba(0,0,0,.06);color:#333;padding:2px 6px;border-radius:3px;font-family:ui-monospace,monospace !important;font-size:13px;word-break:break-all;}" +
+    ".panel li .attrchip.bad{background:#fde2e2;color:#b00020;}" +
+    ".panel li .attrchip.redundant{background:#fdf3e2;color:#b45309;}" +
+    ".panel li .issues-block{margin-top:6px;font-size:14px;}" +
+    ".panel li .issue{display:flex;gap:8px;margin-top:2px;}" +
+    ".panel li .issue .catchip{flex:0 0 auto;display:inline-block;padding:2px 6px;border-radius:3px;color:#fff !important;font-size:12px;font-weight:700 !important;line-height:1.3;}" +
+    ".panel li .issue .text{flex:1 1 auto;color:#111;font-weight:600 !important;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:4px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  // Badges. Every ARIA-using element gets a badge, with colour by status.
+  // Issues are red, redundant-only are amber, valid usage is gray (so the
+  // page is visibly annotated with the ARIA footprint).
+  var badges = [];
+  allResults.forEach(function (r) {
+    if (!r.positioned) return;
+    var status = rowStatus(r);
+    var badge = document.createElement("div");
+    var cls = "badge " + status;
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    var prefix = r.isTop ? "" : "[frame] ";
+    var summaryText;
+    if (status === "issues" || status === "redundant") {
+      summaryText = r.issues.length + " issue" + (r.issues.length === 1 ? "" : "s") + " — " + r.issues[0].text;
+    } else {
+      var roleDesc = r.roleAttr ? 'role="' + r.roleAttr + '"' : (r.ariaAttrs.length + " aria-* attr" + (r.ariaAttrs.length === 1 ? "" : "s"));
+      summaryText = "valid ARIA — " + roleDesc;
+    }
+    badge.textContent = "#" + r.index + " " + prefix + r.tag + ": " + summaryText;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  // Markdown
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  var md = "| # | Frame | Element | Status | role | Implicit role | ARIA attrs | Issues | Selector |\n";
+  md += "|---|-------|---------|--------|------|---------------|------------|--------|----------|\n";
+  allResults.forEach(function (r) {
+    var attrs = r.ariaAttrs.map(function (a) { return a.name + '="' + mdEsc(a.value) + '"'; }).join(" ");
+    var issuesCell = r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    md += "| " + r.index + " | " + frameLabel + " | `" + r.tag + "` | " + rowStatus(r) + " | " + (r.roleAttr ? "`" + mdEsc(r.roleAttr) + "`" : "") + " | " + (r.implicitRole ? "`" + mdEsc(r.implicitRole) + "`" : "") + " | `" + mdEsc(attrs) + "` | " + issuesCell + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  var totalIssues = allResults.reduce(function (a, r) { return a + r.issues.filter(function (i) { return i.category !== "redundant-role"; }).length; }, 0);
+  var totalRedundant = allResults.reduce(function (a, r) { return a + r.issues.filter(function (i) { return i.category === "redundant-role"; }).length; }, 0);
+  var issueRowCount = allResults.filter(function (r) { return rowStatus(r) === "issues"; }).length;
+  var redundantRowCount = allResults.filter(function (r) { return rowStatus(r) === "redundant"; }).length;
+  var okRowCount = allResults.filter(function (r) { return rowStatus(r) === "ok"; }).length;
+  var frameCount = framesData.filter(function (f) { return !f.isTop && f.results && f.results.length; }).length;
+
+  console.group("%c[a11yn aria] " + allResults.length + " ARIA-using elements (" + issueRowCount + " with issues, " + redundantRowCount + " redundant-only, " + okRowCount + " valid) — top doc + " + frameCount + " frame(s)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allResults.map(function (r) {
+    return {
+      "#": r.index,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      element: r.tag,
+      status: rowStatus(r),
+      role: r.roleAttr || "",
+      implicitRole: r.implicitRole || "",
+      ariaAttrs: r.ariaAttrs.map(function (a) { return a.name; }).join(" "),
+      issues: r.issues.map(fmtIssuePanel).join("; ")
+    };
+  }));
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  // The filter classes (filter-all / filter-issues / filter-redundant) drive
+  // CSS-based show/hide so we don't need to re-render the list on toggle.
+  panelEl.className = "panel filter-all";
+
+  var summary = "";
+  if (allResults.length === 0) {
+    summary += '<span class="warn">No elements use role or aria-* attributes on this page.</span>';
+  } else if (issueRowCount === 0 && redundantRowCount === 0) {
+    summary += '<span class="ok">All ' + allResults.length + ' ARIA-using element' + (allResults.length === 1 ? "" : "s") + ' look valid.</span>';
+  } else {
+    var bits = [];
+    if (issueRowCount) bits.push('<span class="miss">' + totalIssues + " issue" + (totalIssues === 1 ? "" : "s") + " across " + issueRowCount + " element" + (issueRowCount === 1 ? "" : "s") + "</span>");
+    if (redundantRowCount) bits.push('<span class="warn">' + redundantRowCount + " redundant role" + (redundantRowCount === 1 ? "" : "s") + "</span>");
+    summary += bits.join(" · ");
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
+  summary += allResults.length + " ARIA-using element" + (allResults.length === 1 ? "" : "s") + " on page (" + okRowCount + " valid, " + redundantRowCount + " redundant, " + issueRowCount + " with issues) · top doc";
+  if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
+  if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
+  summary += "</div>";
+
+  panelEl.innerHTML =
+    "<header><strong>ARIA Usage (" + allResults.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+      '<button data-filter="issues">Issues (' + issueRowCount + ')</button>' +
+      '<button data-filter="redundant">Redundant (' + redundantRowCount + ')</button>' +
+    '</div>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<ol id="' + P + 'list"></ol>';
+
+  // Identify which attribute names appear in issues, so we can highlight the
+  // offending ones as red attribute chips.
+  function attrIsImplicatedInIssue(attrName, issues) {
+    for (var i = 0; i < issues.length; i++) {
+      if (issues[i].text.indexOf(attrName) !== -1) return true;
+    }
+    return false;
+  }
+  function attrIsImplicatedInRedundant(attrName, issues) {
+    if (attrName !== "role") return false;
+    return issues.some(function (i) { return i.category === "redundant-role"; });
+  }
+
+  var list = panelEl.querySelector("#" + P + "list");
+  allResults.forEach(function (r) {
+    var status = rowStatus(r);
+    var li = document.createElement("li");
+    li.classList.add("status-" + status);
+    var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+    var attrChips = r.ariaAttrs.map(function (a) {
+      var bad = attrIsImplicatedInIssue(a.name, r.issues);
+      var redundant = attrIsImplicatedInRedundant(a.name, r.issues);
+      var chipClass = "attrchip";
+      if (bad) chipClass += " bad";
+      else if (redundant) chipClass += " redundant";
+      return '<span class="' + chipClass + '"><code>' + esc(a.name) + (a.value ? "=" + esc(JSON.stringify(a.value)) : "") + "</code></span>";
+    }).join("");
+
+    var issuesHtml = r.issues.map(function (issue) {
+      var color = CATEGORY_COLORS[issue.category] || "#b00020";
+      return '<div class="issue"><span class="catchip" style="background:' + color + '">' + esc(issue.category) + '</span><span class="text">' + esc(fmtIssuePanel(issue)) + "</span></div>";
+    }).join("");
+
+    var statusChipLabel = status === "issues" ? "ISSUES" : (status === "redundant" ? "redundant" : "ok");
+    var implicitNote = r.implicitRole ? ' <span style="color:#999;font-size:13px">(implicit: ' + esc(r.implicitRole) + ')</span>' : "";
+
+    li.innerHTML =
+      '<div class="row">' +
+        '<span class="statuschip ' + status + '">' + esc(statusChipLabel) + '</span>' +
+        '<span class="meta">#' + r.index + " " + location + "<code>&lt;" + esc(r.tag) + "&gt;</code>" + implicitNote + "</span>" +
+      "</div>" +
+      '<div class="attrs">' + attrChips + "</div>" +
+      (issuesHtml ? '<div class="issues-block">' + issuesHtml + "</div>" : "") +
+      '<div class="src">' + esc(r.selector) + "</div>";
+
+    li.addEventListener("click", function () {
+      try {
+        if (r._resolveEl) {
+          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        } else if (r.iframeEl) {
+          r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (r.badge) {
+          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        }
+      } catch (e) {}
+    });
+    list.appendChild(li);
+  });
+  shadow.appendChild(panelEl);
+
+  // Filter bar toggling: swap the panel's filter-* class so CSS controls display.
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+
+  // Drag-by-header
   (function () {
     var header = panelEl.querySelector("header");
     if (!header) return;

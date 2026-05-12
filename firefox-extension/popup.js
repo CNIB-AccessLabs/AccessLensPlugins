@@ -1,8 +1,9 @@
 /* AccessibleName Inspector — popup script.
  *
  * Shows what's currently inspecting on the page (if anything), and lets the
- * user pick a check to run. Hotkeys (Alt+A for names, Alt+H for headings)
- * skip the popup entirely and run via background's commands.onCommand.
+ * user pick a check to run. The toolbar click is the only entry point;
+ * the manifest's `commands` section is intentionally empty because Chrome
+ * enforces a four-shortcut limit and the inspector has more than that.
  */
 
 const api = typeof browser !== "undefined" ? browser : chrome;
@@ -11,7 +12,9 @@ const CHECK_LABELS = {
   names: "Accessible Names",
   headings: "Headings",
   landmarks: "Landmarks",
-  images: "Images"
+  images: "Images",
+  links: "Link Text",
+  aria: "ARIA Validation"
 };
 
 async function getActiveTab() {

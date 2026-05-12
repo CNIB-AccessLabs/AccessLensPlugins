@@ -47,7 +47,7 @@ Limit: same-origin policy stops the recursion at cross-origin iframe boundaries.
 ## Extension topology
 
 ```
-[ User clicks toolbar button (or Alt+A) ]
+[ User clicks toolbar button → popup opens → picks a check ]
             │
             ▼
 [ background.js: handleClick ]

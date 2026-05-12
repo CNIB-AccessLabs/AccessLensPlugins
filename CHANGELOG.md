@@ -8,26 +8,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **Headings check.** Reports every `<h1>` … `<h6>` and `[role="heading"]` element with its level, document-order number, text content, and selector. Indented tree view in the panel; coloured "H{level}" chips per row. Hotkey: **Alt+H**. Flags:
+- **Headings check.** Reports every `<h1>` … `<h6>` and `[role="heading"]` element with its level, document-order number, text content, and selector. Indented tree view in the panel; coloured "H{level}" chips per row. Flags:
   - Empty headings (no text content).
   - Skipped levels (e.g. `<h2>` followed by `<h4>`).
   - Multiple `<h1>` on a single page.
   - `role="heading"` with no `aria-level`.
   - `aria-level` out of the 1–6 range.
   - `aria-level` overriding the native `<hN>` level (shown as informational, not flagged).
-- **Landmarks check.** Reports page-region landmarks (banner, navigation, main, complementary, contentinfo, region, search, form) from both HTML5 sectioning elements and explicit `role="…"` attributes. Hotkey: **Alt+L**. Applies the correct nesting rules: `<header>`/`<footer>` only count as banner/contentinfo when not nested inside `<article>`/`<aside>`/`<main>`/`<nav>`/`<section>`; `<section>`/`<form>` only become landmarks when they have an accessible name (via `aria-labelledby` or `aria-label`). Per-role chip colours in the panel. Flags:
+- **Landmarks check.** Reports page-region landmarks (banner, navigation, main, complementary, contentinfo, region, search, form) from both HTML5 sectioning elements and explicit `role="…"` attributes. Applies the correct nesting rules: `<header>`/`<footer>` only count as banner/contentinfo when not nested inside `<article>`/`<aside>`/`<main>`/`<nav>`/`<section>`; `<section>`/`<form>` only become landmarks when they have an accessible name (via `aria-labelledby` or `aria-label`). Per-role chip colours in the panel. Flags:
   - Multiple `<main>` landmarks on a single page.
   - `role="region"` without an accessible name.
   - Multiple landmarks of the same role with no accessible name, or sharing the same name (AT can't tell them apart).
   - Candidates that didn't qualify as landmarks (e.g. `<section>` without a name) are listed under a collapsible "Non-landmark candidates" section so they're not silently invisible.
 - **Issue messages now reference every involved element.** When a single issue spans multiple elements (multiple `<h1>`, multiple unnamed same-role landmarks, skipped heading level pointing back to an earlier heading), each row now lists the related element indices inline. The panel uses compact form — `multiple h1 on page (also: #5, #8)` — and the Markdown table expands to include selectors — `multiple h1 on page (also: #5 \`#main > h1\`, #8 \`#sidebar > h1\`)` — so audit notes are self-contained.
-- **Images check.** Reports every image-like element on the page: `<img>`, `<input type="image">`, `<area>`, `[role="img"]`, and `<svg>` with explicit `role="img"` or `aria-label`/`aria-labelledby`. Hotkey: **Alt+I**. Each image is classified into one of four statuses with chip colours:
+- **Images check.** Reports every image-like element on the page: `<img>`, `<input type="image">`, `<area>`, `[role="img"]`, and `<svg>` with explicit `role="img"` or `aria-label`/`aria-labelledby`. Each image is classified into one of four statuses with chip colours:
   - **labeled** — has an accessible name from `aria-labelledby`, `aria-label`, `alt`, `<title>` child (for `<svg>`), or `title` attribute
   - **decorative** — `alt=""`, `role="presentation"`/`"none"`, or `aria-hidden="true"` (intentionally hidden from AT)
   - **MISSING** — no alt attribute and no aria-* labeling (screen readers may announce the src URL)
   - **suspicious** — alt is present but the text looks wrong: filename pattern (`.jpg`, `IMG_1234`), generic single word ("image", "photo", "logo"), or redundant prefix ("image of …")
   - Panel shows each image's raw `alt` attribute alongside its computed accessible name and a truncated `src`/`href`, so auditors can verify whether the alt actually describes what the image conveys.
-- **Popup-driven multi-check architecture.** The toolbar icon now opens a popup listing every check. The popup shows whether an inspection is currently displayed on the page and offers a Close button. Each check still works as a one-keystroke hotkey (Alt+A for names, Alt+H for headings) that skips the popup entirely.
+- **ARIA Validation check.** Lists every element on the page that uses `role` or any `aria-*` attribute, with a status chip (ok / redundant / issues) plus the element's complete ARIA attribute inventory. The panel header has a filter bar — All / Issues / Redundant — so you can either survey the developer's overall approach (is ARIA being used too much, too little, or duplicated?) or focus only on actionable bugs. Each ARIA-using element also gets a coloured outline on the page (red for issues, amber for redundant-only, light gray dotted for valid usage) so the page itself shows the ARIA footprint. Issue categories:
+  - **unknown-role** — role value not in ARIA 1.2's concrete role list, with Levenshtein-based "did you mean" suggestion
+  - **abstract-role** — role is one of ARIA's abstract roles (e.g. `widget`, `composite`), which must not be used by authors
+  - **unknown-attr** — `aria-*` attribute name not in ARIA 1.2's list, with suggestion
+  - **bad-bool** / **bad-tristate** — boolean or tristate attribute got an invalid value (e.g. `aria-expanded="yes"`)
+  - **bad-idref** — ID-reference attribute (`aria-labelledby`, `aria-describedby`, `aria-controls`, `aria-owns`, `aria-activedescendant`, `aria-errormessage`, `aria-details`, `aria-flowto`) references one or more IDs that don't exist in the document
+  - **missing-required** — role declares a required `aria-*` attribute that isn't present AND the attribute has no sensible default. Fires for `role="heading"` (needs `aria-level` — defaults to `2`, but if the developer reached for `role="heading"` they almost certainly meant a specific level), `role="scrollbar"` (needs `aria-controls` and `aria-valuenow`), `role="slider"` (needs `aria-valuenow`), and `role="meter"` (needs `aria-valuenow`). Roles whose required attributes have sensible defaults — `checkbox` / `radio` / `switch` (`aria-checked` defaults to `false`) and `combobox` (`aria-expanded` defaults to `false`) — are deliberately NOT flagged.
+  - **redundant-role** — explicit `role` attribute duplicates the element's native implicit role (e.g. `<nav role="navigation">`, `<button role="button">`, `<h2 role="heading">`). Not a bug, but a smell: tells you about the developer's understanding of native semantics.
+  - **presentation-conflict** — `role="presentation"`/`"none"` on a focusable element conflicts with its native interactive role
+- **Link Text check.** Reports every `<a href>` and `[role="link"]` element with its accessible name, classified per WCAG 2.4.4 / 2.4.9. Statuses:
+  - **ok** — descriptive, unique to its destination
+  - **EMPTY** — no accessible name at all
+  - **generic** — name is one of a list of well-known generic phrases ("click here", "more", "read more", "learn more", "view all", and ~25 others)
+  - **url-as-text** — visible text is the URL itself (AT reads it character by character)
+  - **ambiguous** — same text → different `href` (cross-link cluster, references via `(also: #3, #7)`)
+  - **inconsistent** — same `href` → different text (cross-link cluster)
+  - Cross-link clusters surface in the `related` field on each issue so the panel and Markdown both show every member of the cluster, not just the current row.
+- **Popup-driven multi-check architecture.** The toolbar icon opens a popup listing every available check. The popup shows whether an inspection is currently displayed on the page and offers a Close button. No keyboard shortcuts are bound by default — Chrome enforces a four-shortcut limit on extension commands and we have more than that, so all activation goes through the toolbar popup.
 - **Draggable inspector panel.** Grab the panel's title bar to move it anywhere on screen — useful when the default top-right position covers the element you're inspecting. Uses pointer capture so the drag survives crossing iframes and other elements that would otherwise swallow mouse events. Buttons inside the title bar (Close, Copy MD) still receive clicks normally. The bookmarklet panel is also draggable.
 - Extension renamed to **AccessibleName Inspector** to reflect its expansion beyond names. Existing Firefox extension ID (`a11y-names@cnib.ca`) is preserved so updates land in place.
 
@@ -37,8 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Migration notes
 
-- After updating, the toolbar click no longer runs the names check directly — it opens the popup. The previous one-click flow is preserved via the **Alt+A** hotkey, which runs names directly. If you want toolbar-click-to-names, that's a configuration tweak.
-- The Firefox extension `commands` section changed; you may need to re-confirm keyboard shortcuts in `about:addons` → Manage Extension Shortcuts.
+- After updating, the toolbar click no longer runs the names check directly — it opens the popup, where every check (including names) is one click away.
 
 ## [1.0.4] — 2026-05-11
 

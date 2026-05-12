@@ -18,7 +18,7 @@ Temporary add-ons disappear when Firefox closes. See "Permanent install" below.
 
 ## Use
 
-- Click the **a11y: names** toolbar button or press **Alt+A** on any page.
+- Click the **AccessibleName Inspector** toolbar button on any page; a small popup lets you pick which check to run.
 - Each interactive element gets an outline and a badge with its computed accessible name. Top-frame elements use blue; iframe elements use green. Anything missing a name is red.
 - The right-side panel lists everything across every frame. Click a row to jump to that element.
 - **Copy MD** puts a Markdown table on your clipboard for your notebook. The same table is in DevTools console alongside a `console.table` view.
