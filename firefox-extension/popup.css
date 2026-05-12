@@ -1,0 +1,101 @@
+/* AccessibleName Inspector — popup styles
+ * Hard-coded font-family using only CSS generic keywords so @font-face on
+ * the host browser UI can't reach us. Body width matches Chrome/Firefox popup
+ * default constraints. */
+
+:root { color-scheme: light dark; }
+
+* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif; }
+
+body {
+  min-width: 320px;
+  margin: 0;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1.4;
+  color: #111;
+  background: #fff;
+}
+
+header {
+  padding: 10px 14px;
+  background: #003876;
+  color: #fff;
+}
+header strong { font-size: 16px; font-weight: 600; }
+
+#status {
+  padding: 10px 14px;
+  font-size: 15px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #e0e0e0;
+}
+#status .active { color: #003876; font-weight: 600; }
+#status .nothing { color: #555; }
+#status button {
+  margin-left: 8px;
+  background: #fff;
+  border: 1px solid #003876;
+  color: #003876;
+  padding: 3px 10px;
+  border-radius: 3px;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+#status button:hover { background: #eef4ff; }
+
+section { padding: 12px 14px; }
+
+.hint {
+  margin: 0 0 8px 0;
+  color: #555;
+  font-size: 14px;
+}
+
+.checks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.checks li { padding: 0; }
+
+.check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #cfd6e0;
+  border-radius: 5px;
+  cursor: pointer;
+  font: 600 16px/1.2 ui-sans-serif, system-ui, sans-serif;
+  color: #003876;
+  text-align: left;
+}
+.check:hover { background: #eef4ff; border-color: #003876; }
+.check:focus-visible { outline: 2px solid #003876; outline-offset: 2px; }
+.check .key {
+  font-size: 13px;
+  color: #555;
+  font-weight: 400;
+}
+
+.desc {
+  margin: 4px 0 0 0;
+  color: #555;
+  font-size: 13px;
+}
+
+footer {
+  padding: 8px 14px;
+  border-top: 1px solid #e0e0e0;
+  background: #f5f7fa;
+  font-size: 12px;
+}
+footer a { color: #003876; text-decoration: none; }
+footer a:hover { text-decoration: underline; }

@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "a11y: Accessible Names",
-  "version": "1.0.4",
-  "description": "Reports the computed accessible name of every interactive element on a page, across iframes (including cross-origin) and shadow DOM. No network calls.",
-  "permissions": ["activeTab", "scripting"],
+  "name": "AccessibleName Inspector",
+  "version": "1.1.0",
+  "description": "Multi-check accessibility inspector: accessible names, headings, and more. Reports across iframes (including cross-origin) and shadow DOM. No network calls.",
+  "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
   "action": {
-    "default_title": "a11y: scan accessible names (Alt+A)",
+    "default_title": "AccessibleName Inspector",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -24,11 +25,13 @@
     "service_worker": "background.js"
   },
   "commands": {
-    "_execute_action": {
-      "suggested_key": {
-        "default": "Alt+A"
-      },
+    "run-names": {
+      "suggested_key": { "default": "Alt+A" },
       "description": "Scan accessible names"
+    },
+    "run-headings": {
+      "suggested_key": { "default": "Alt+H" },
+      "description": "Inspect heading structure"
     }
   }
 }

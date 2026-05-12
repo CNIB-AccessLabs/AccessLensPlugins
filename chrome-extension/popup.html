@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AccessibleName Inspector</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <strong>AccessibleName Inspector</strong>
+</header>
+<section id="status">Loading…</section>
+<section>
+  <p class="hint">Run a check on this page:</p>
+  <ul class="checks">
+    <li>
+      <button class="check" data-check="names">
+        <span class="label">Accessible Names</span>
+        <span class="key">Alt+A</span>
+      </button>
+      <p class="desc">Reports the computed accessible name of every interactive element.</p>
+    </li>
+    <li>
+      <button class="check" data-check="headings">
+        <span class="label">Headings</span>
+        <span class="key">Alt+H</span>
+      </button>
+      <p class="desc">Heading tree: levels, numbers, skipped levels, empty headings, multiple h1, role="heading" issues.</p>
+    </li>
+  </ul>
+</section>
+<footer>
+  <a href="https://github.com/CNIB-AccessLabs/AccessibleName" target="_blank" rel="noopener">CNIB-AccessLabs/AccessibleName</a>
+</footer>
+<script src="popup.js"></script>
+</body>
+</html>

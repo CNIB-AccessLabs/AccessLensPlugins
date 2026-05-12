@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-05-12
+
+### Added
+
+- **Headings check.** Reports every `<h1>` … `<h6>` and `[role="heading"]` element with its level, document-order number, text content, and selector. Indented tree view in the panel; coloured "H{level}" chips per row. Hotkey: **Alt+H**. Flags:
+  - Empty headings (no text content).
+  - Skipped levels (e.g. `<h2>` followed by `<h4>`).
+  - Multiple `<h1>` on a single page.
+  - `role="heading"` with no `aria-level`.
+  - `aria-level` out of the 1–6 range.
+  - `aria-level` overriding the native `<hN>` level (shown as informational, not flagged).
+- **Popup-driven multi-check architecture.** The toolbar icon now opens a popup listing every check. The popup shows whether an inspection is currently displayed on the page and offers a Close button. Each check still works as a one-keystroke hotkey (Alt+A for names, Alt+H for headings) that skips the popup entirely.
+- Extension renamed to **AccessibleName Inspector** to reflect its expansion beyond names. Existing Firefox extension ID (`a11y-names@cnib.ca`) is preserved so updates land in place.
+
+### Changed
+
+- Bumped extension manifests to `1.1.0`.
+
+### Migration notes
+
+- After updating, the toolbar click no longer runs the names check directly — it opens the popup. The previous one-click flow is preserved via the **Alt+A** hotkey, which runs names directly. If you want toolbar-click-to-names, that's a configuration tweak.
+- The Firefox extension `commands` section changed; you may need to re-confirm keyboard shortcuts in `about:addons` → Manage Extension Shortcuts.
+
 ## [1.0.4] — 2026-05-11
 
 ### Fixed
