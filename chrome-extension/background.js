@@ -23,7 +23,8 @@ const api = typeof browser !== "undefined" ? browser : chrome;
 const CHECKS = {
   names:     { label: "Accessible Names", scan: scanNames,     display: displayNames     },
   headings:  { label: "Headings",         scan: scanHeadings,  display: displayHeadings  },
-  landmarks: { label: "Landmarks",        scan: scanLandmarks, display: displayLandmarks }
+  landmarks: { label: "Landmarks",        scan: scanLandmarks, display: displayLandmarks },
+  images:    { label: "Images",           scan: scanImages,    display: displayImages    }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -50,6 +51,7 @@ api.commands.onCommand.addListener(async (cmd) => {
     if (cmd === "run-names")     await runCheck(tabs[0].id, "names");
     if (cmd === "run-headings")  await runCheck(tabs[0].id, "headings");
     if (cmd === "run-landmarks") await runCheck(tabs[0].id, "landmarks");
+    if (cmd === "run-images")    await runCheck(tabs[0].id, "images");
   } catch (e) {
     console.error("[a11yn] command failed:", e);
   }
@@ -1616,6 +1618,617 @@ function displayLandmarks(framesData, checkId) {
   // clicks normally — pointerdown on a button target is ignored.
   // Uses setPointerCapture so the drag survives the cursor passing over
   // iframes or other elements that would normally swallow mouse events.
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allResults.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+}
+
+/* ====================================================================
+ * CHECK: IMAGES — image alt-text inspector
+ *
+ * Inspects every image-like element on the page:
+ *   <img>, <input type="image">, <area>, [role="img"]
+ *   <svg> when it has role="img" or aria-label/aria-labelledby
+ *     (untyped <svg> without those is opaque — we don't flag it here
+ *      because it could be a decorative shape or a meaningful graphic)
+ *
+ * Each image is classified as ONE of:
+ *
+ *   LABELED      good — has an accessible name from aria-labelledby,
+ *                aria-label, alt, or title
+ *   DECORATIVE   alt="" (explicit empty), role="presentation"/"none",
+ *                or aria-hidden="true" — intentionally hidden from AT
+ *   MISSING      no alt attribute at all and no aria-* labeling — AT
+ *                may announce the src URL or skip the image
+ *   SUSPICIOUS   has alt but the text looks wrong:
+ *                  - looks like a filename (image.jpg, IMG_1234)
+ *                  - generic single word (image, photo, icon, logo)
+ *                  - starts with "image of …", "picture of …" (redundant)
+ *
+ * The panel uses chip colours to distinguish the four states at a glance.
+ * ==================================================================== */
+
+function scanImages() {
+  "use strict";
+  try {
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        if (!win) return false;
+        var st = win.getComputedStyle(el);
+        return st.display === "none" || st.visibility === "hidden";
+      } catch (e) { return false; }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    function imageAccName(el) {
+      var aLab = el.getAttribute("aria-labelledby");
+      if (aLab) {
+        var doc = el.ownerDocument || document;
+        var root = el.getRootNode ? el.getRootNode() : doc;
+        var parts = aLab.split(/\s+/).map(function (id) {
+          var ref = (root.getElementById && root.getElementById(id)) || doc.getElementById(id);
+          return ref ? txt(ref.textContent) : "";
+        }).filter(Boolean);
+        if (parts.length) return { name: parts.join(" "), src: "aria-labelledby" };
+      }
+      var aL = el.getAttribute("aria-label");
+      if (aL && aL.trim()) return { name: aL.trim(), src: "aria-label" };
+      // alt attribute — explicit empty alt is decorative, handled separately
+      var alt = el.getAttribute("alt");
+      if (alt !== null && alt !== "") return { name: alt, src: "alt" };
+      // <svg> can have a <title> child as its accessible name
+      if (el.tagName && el.tagName.toLowerCase() === "svg") {
+        var firstTitle = el.querySelector(":scope > title");
+        if (firstTitle) {
+          var t = txt(firstTitle.textContent);
+          if (t) return { name: t, src: "<title> child" };
+        }
+      }
+      var ti = el.getAttribute("title");
+      if (ti && ti.trim()) return { name: ti.trim(), src: "title" };
+      return { name: "", src: "" };
+    }
+
+    function isDecorative(el) {
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      var role = el.getAttribute("role");
+      if (role === "presentation" || role === "none") return true;
+      var alt = el.getAttribute("alt");
+      if (alt === "") return true; // explicit empty alt
+      return false;
+    }
+
+    // Returns the kind of "suspicious" warning, or null if the alt looks fine.
+    function checkAltSuspicious(altText) {
+      if (!altText) return null;
+      var t = altText.trim();
+      if (!t) return null;
+      if (/\.(jpe?g|png|gif|webp|svg|bmp|tiff?|avif|heic)$/i.test(t)) {
+        return "alt text looks like a filename";
+      }
+      if (/^(IMG[_-]|DSC[_FN-]|P\d{7,8}|GOPR|PXL_)/i.test(t)) {
+        return "alt text looks like a camera filename";
+      }
+      var lower = t.toLowerCase();
+      var generic = ["image", "picture", "photo", "graphic", "icon", "img", "logo", "pic"];
+      if (generic.indexOf(lower) !== -1) {
+        return 'alt text is generic ("' + t + '") — describe what the image conveys';
+      }
+      if (/^(image|picture|photo|graphic) of /i.test(t)) {
+        return 'alt text starts with redundant phrase ("' + t.split(/ /).slice(0, 2).join(" ") + ' …") — AT already announces "image"';
+      }
+      return null;
+    }
+
+    var SELECTOR = [
+      "img",
+      'input[type="image"]',
+      "area",
+      '[role="img"]',
+      'svg[aria-label]', 'svg[aria-labelledby]'
+    ].join(",");
+
+    var results = [];
+    var seenEls = new Set();
+    var shadowRoots = 0;
+
+    function walk(root) {
+      var matches;
+      try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
+      Array.prototype.forEach.call(matches, function (el) {
+        if (seenEls.has(el)) return;
+        seenEls.add(el);
+        if (isHidden(el)) return;
+        var r;
+        try { r = el.getBoundingClientRect(); } catch (e) { return; }
+        // Skip 0x0 — usually invisible tracking pixels; we still report explicit
+        // role="img" elements with 0 dimensions because those are likely
+        // CSS-styled icons.
+        var tag = el.tagName.toLowerCase();
+        var role = el.getAttribute("role");
+        if (r.width === 0 && r.height === 0 && role !== "img") return;
+
+        var hasAltAttribute = el.hasAttribute("alt");
+        var rawAlt = el.getAttribute("alt");
+        var an = imageAccName(el);
+        var decorative = isDecorative(el);
+        var suspicious = !decorative && rawAlt && rawAlt !== "" ? checkAltSuspicious(rawAlt) : null;
+
+        var srcInfo = "";
+        if (tag === "img") srcInfo = el.getAttribute("src") || "";
+        else if (tag === "input") srcInfo = el.getAttribute("src") || "";
+        else if (tag === "area") srcInfo = el.getAttribute("href") || "";
+        else if (tag === "svg") srcInfo = "(inline svg)";
+        else if (role === "img") srcInfo = "(role=img on " + tag + ")";
+
+        // Classification
+        var status;
+        if (decorative) status = "decorative";
+        else if (suspicious) status = "suspicious";
+        else if (!an.name && (tag === "img" || tag === "input" || tag === "area" || role === "img" || tag === "svg")) status = "missing";
+        else status = "labeled";
+
+        // For img elements specifically, "missing" requires NO alt attribute.
+        // alt="" already handled as decorative; alt="X" gives a name. The
+        // "missing" case is when alt is entirely absent OR present but empty
+        // AND we couldn't get a name from aria.
+        if (tag === "img" && hasAltAttribute && !decorative && !an.name && !suspicious) {
+          // alt is present but produced empty name through accName logic — odd
+          // edge case (shouldn't normally happen); treat as labeled empty.
+          status = "decorative";
+        }
+
+        results.push({
+          tag: tag,
+          role: role || null,
+          status: status,
+          name: an.name,
+          nameSrc: an.src,
+          rawAlt: rawAlt,
+          hasAltAttribute: hasAltAttribute,
+          decorative: decorative,
+          suspicious: suspicious,
+          src: srcInfo,
+          selector: uniqueSelector(el),
+          rect: { top: r.top, left: r.left, width: r.width, height: r.height }
+        });
+      });
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      Array.prototype.forEach.call(all, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document);
+
+    results.sort(function (a, b) {
+      if (a.rect.top !== b.rect.top) return a.rect.top - b.rect.top;
+      return a.rect.left - b.rect.left;
+    });
+
+    return { url: window.location.href, isTop: window === window.top, results: results, shadowRoots: shadowRoots };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
+  }
+}
+
+function displayImages(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  var allResults = [];
+  var unmatchedFrames = 0;
+  var frameLabelByUrl = new Map();
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    if (!frame.results || !frame.results.length) return;
+    var offX = 0, offY = 0, positioned = true, inFrame = !frame.isTop;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    frame.results.forEach(function (r) {
+      allResults.push({
+        tag: r.tag, role: r.role, status: r.status,
+        name: r.name, nameSrc: r.nameSrc,
+        rawAlt: r.rawAlt, hasAltAttribute: r.hasAltAttribute,
+        decorative: r.decorative, suspicious: r.suspicious,
+        src: r.src,
+        selector: r.selector,
+        frameUrl: frame.url,
+        frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
+        isTop: !inFrame,
+        pageTop: window.scrollY + offY + r.rect.top,
+        pageLeft: window.scrollX + offX + r.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      });
+    });
+  });
+  allResults.forEach(function (r, i) { r.index = i + 1; });
+
+  // Compute issues per image based on status
+  allResults.forEach(function (r) {
+    r.issues = [];
+    if (r.status === "missing") {
+      if (r.tag === "img" && !r.hasAltAttribute) {
+        r.issues.push({ text: "no alt attribute (and no aria-* label) — screen readers may announce the src URL", related: [] });
+      } else if (r.tag === "input") {
+        r.issues.push({ text: "<input type=\"image\"> has no accessible name", related: [] });
+      } else if (r.tag === "area") {
+        r.issues.push({ text: "<area> has no accessible name", related: [] });
+      } else if (r.role === "img") {
+        r.issues.push({ text: "[role=\"img\"] element has no accessible name", related: [] });
+      } else if (r.tag === "svg") {
+        r.issues.push({ text: "<svg> with role=\"img\" or aria-* labeling has no accessible name", related: [] });
+      } else {
+        r.issues.push({ text: "no accessible name", related: [] });
+      }
+    } else if (r.status === "suspicious") {
+      r.issues.push({ text: r.suspicious, related: [] });
+    }
+  });
+
+  function fmtIssuePanel(issue) {
+    if (!issue.related || !issue.related.length) return issue.text;
+    return issue.text + " (also: " + issue.related.map(function (i) { return "#" + i; }).join(", ") + ")";
+  }
+  function fmtIssueMd(issue) {
+    if (!issue.related || !issue.related.length) return mdEsc(issue.text);
+    var refs = issue.related.map(function (i) {
+      var other = allResults[i - 1];
+      return "#" + i + " `" + mdEsc(other ? other.selector : "") + "`";
+    });
+    return mdEsc(issue.text) + " (also: " + refs.join(", ") + ")";
+  }
+
+  // Resolve element refs for outline + click-to-scroll
+  allResults.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var color, style;
+        if (r.status === "missing") { color = "#b00020"; style = "dashed"; }
+        else if (r.status === "suspicious") { color = "#b45309"; style = "dashed"; }
+        else if (r.status === "decorative") { color = "#999"; style = "dotted"; }
+        else { color = "#003876"; style = "solid"; }
+        el.style.setProperty("outline", "2px " + style + " " + color, "important");
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  // Shadow UI host
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var STATUS_COLORS = {
+    labeled:    "#003876",
+    decorative: "#666666",
+    missing:    "#b00020",
+    suspicious: "#b45309"
+  };
+  var STATUS_LABELS = {
+    labeled:    "labeled",
+    decorative: "decorative",
+    missing:    "MISSING",
+    suspicious: "suspicious"
+  };
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:520px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;display:flex;align-items:flex-start;gap:10px;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li .gutter{flex:0 0 auto;width:22px;color:#999;font-size:14px;text-align:right;}" +
+    ".panel li .statuschip{flex:0 0 auto;display:inline-block;min-width:90px;text-align:center;padding:4px 8px;border-radius:3px;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;}" +
+    ".panel li .body{flex:1 1 auto;min-width:0;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .name{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
+    ".panel li .name.no-name{color:#666;font-style:italic;font-weight:400 !important;}" +
+    ".panel li .alt{margin-top:2px;color:#444;font-size:14px;word-break:break-word;}" +
+    ".panel li .alt em{color:#666;font-style:italic;font-weight:400 !important;}" +
+    ".panel li .issues{color:#b00020;font-size:14px;margin-top:4px;font-weight:600 !important;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:2px;word-break:break-all;}" +
+    ".panel li .imgsrc{color:#0a5d2e;font-size:13px;margin-top:2px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  // Badges
+  var badges = [];
+  allResults.forEach(function (r) {
+    if (!r.positioned) return;
+    var badge = document.createElement("div");
+    var cls = "badge";
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    badge.style.background = STATUS_COLORS[r.status] || "#003876";
+    var prefix = r.isTop ? "" : "[frame] ";
+    var label = STATUS_LABELS[r.status] || r.status;
+    var summary = r.name ? r.name : (r.status === "decorative" ? "(decorative)" : "(no name)");
+    badge.textContent = "#" + r.index + " " + prefix + r.tag + " " + label + ": " + summary;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  // Markdown
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  function truncSrc(s) {
+    if (!s) return "";
+    if (s.length <= 60) return s;
+    return s.slice(0, 28) + "…" + s.slice(-28);
+  }
+  var md = "| # | Frame | Element | Status | Accessible Name | Source | Alt | src/href | Issues | Selector |\n";
+  md += "|---|-------|---------|--------|-----------------|--------|-----|----------|--------|----------|\n";
+  allResults.forEach(function (r) {
+    var elem = "`" + r.tag + (r.tag === "input" ? '[type="image"]' : "") + "`";
+    var name = r.name ? mdEsc(r.name) : (r.status === "decorative" ? "*(decorative)*" : "*(none)*");
+    var altCell = r.rawAlt === null ? "*(no alt attr)*"
+                : r.rawAlt === "" ? "`alt=\"\"`"
+                : "`" + mdEsc(r.rawAlt) + "`";
+    var issues = r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    md += "| " + r.index + " | " + frameLabel + " | " + elem + " | " + r.status + " | " + name + " | " + (r.nameSrc || "") + " | " + altCell + " | `" + mdEsc(truncSrc(r.src)) + "` | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  // Tallies
+  var counts = { labeled: 0, decorative: 0, missing: 0, suspicious: 0 };
+  allResults.forEach(function (r) { counts[r.status]++; });
+  var frameCount = framesData.filter(function (f) { return !f.isTop && f.results && f.results.length; }).length;
+  var problemCount = counts.missing + counts.suspicious;
+
+  console.group("%c[a11yn images] " + allResults.length + " image-like elements (" + counts.missing + " missing, " + counts.suspicious + " suspicious, " + counts.decorative + " decorative) — top doc + " + frameCount + " frame(s)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allResults.map(function (r) {
+    return {
+      "#": r.index,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      element: r.tag,
+      status: r.status,
+      name: r.name || (r.status === "decorative" ? "(decorative)" : "(none)"),
+      alt: r.rawAlt === null ? "(no attr)" : r.rawAlt,
+      issues: r.issues.map(fmtIssuePanel).join("; ")
+    };
+  }));
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel";
+
+  var summary = "";
+  if (allResults.length === 0) {
+    summary += '<span class="warn">No image-like elements found.</span>';
+  } else if (problemCount === 0) {
+    summary += '<span class="ok">All ' + counts.labeled + ' labeled image' + (counts.labeled === 1 ? "" : "s") + ' look good (' + counts.decorative + ' marked decorative).</span>';
+  } else {
+    var bits = [];
+    if (counts.missing) bits.push(counts.missing + " missing");
+    if (counts.suspicious) bits.push(counts.suspicious + " suspicious");
+    summary += '<span class="miss">' + bits.join(", ") + " of " + allResults.length + " images.</span>";
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
+  summary += counts.labeled + " labeled · " + counts.decorative + " decorative · " + counts.missing + " missing · " + counts.suspicious + " suspicious";
+  summary += " · top doc";
+  if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
+  if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
+  summary += "</div>";
+
+  panelEl.innerHTML =
+    "<header><strong>Images (" + allResults.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<ol id="' + P + 'list"></ol>';
+
+  var list = panelEl.querySelector("#" + P + "list");
+  allResults.forEach(function (r) {
+    var li = document.createElement("li");
+    var chipColor = STATUS_COLORS[r.status] || "#003876";
+    var chipLabel = STATUS_LABELS[r.status] || r.status;
+    var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+    var elemTag = r.tag + (r.tag === "input" ? '[type="image"]' : "") + (r.role ? ' [role="' + esc(r.role) + '"]' : "");
+
+    var nameHtml;
+    if (r.name) {
+      nameHtml = '<div class="name">' + esc(r.name) + (r.nameSrc ? ' <span style="color:#999;font-weight:400;font-size:14px">via ' + esc(r.nameSrc) + "</span>" : "") + "</div>";
+    } else if (r.status === "decorative") {
+      nameHtml = '<div class="name no-name">(decorative — intentionally no name)</div>';
+    } else {
+      nameHtml = '<div class="name no-name">(no accessible name)</div>';
+    }
+
+    var altHtml = "";
+    if (r.rawAlt === null) {
+      altHtml = '<div class="alt"><em>alt attribute absent</em></div>';
+    } else if (r.rawAlt === "") {
+      altHtml = '<div class="alt"><code>alt=""</code> <em>(explicit empty alt)</em></div>';
+    } else {
+      altHtml = '<div class="alt"><code>alt=' + esc(JSON.stringify(r.rawAlt)) + "</code></div>";
+    }
+
+    var srcHtml = r.src ? '<div class="imgsrc">' + esc(truncSrc(r.src)) + "</div>" : "";
+
+    li.innerHTML =
+      '<span class="gutter">' + r.index + "</span>" +
+      '<span class="statuschip" style="background:' + chipColor + '">' + esc(chipLabel) + "</span>" +
+      '<div class="body">' +
+        '<div class="meta">' + location + "<code>&lt;" + esc(elemTag) + "&gt;</code></div>" +
+        nameHtml +
+        altHtml +
+        srcHtml +
+        (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.map(fmtIssuePanel).join("; ")) + "</div>" : "") +
+        '<div class="src">' + esc(r.selector) + "</div>" +
+      "</div>";
+
+    li.addEventListener("click", function () {
+      try {
+        if (r._resolveEl) {
+          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        } else if (r.iframeEl) {
+          r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (r.badge) {
+          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        }
+      } catch (e) {}
+    });
+    list.appendChild(li);
+  });
+  shadow.appendChild(panelEl);
+
+  // Drag-by-header (same pattern as other checks)
   (function () {
     var header = panelEl.querySelector("header");
     if (!header) return;

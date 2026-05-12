@@ -48,6 +48,12 @@
         "default": "Alt+L"
       },
       "description": "Inspect landmarks / page regions"
+    },
+    "run-images": {
+      "suggested_key": {
+        "default": "Alt+I"
+      },
+      "description": "Inspect image alt text"
     }
   }
 }
