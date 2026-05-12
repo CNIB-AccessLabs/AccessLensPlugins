@@ -435,6 +435,50 @@
   });
   shadow.appendChild(panelEl);
 
+  // Make the panel draggable by its header. The user can move it off any
+  // element they want to inspect. Buttons inside the header still receive
+  // clicks normally — pointerdown on a button target is ignored.
+  // Uses setPointerCapture so the drag survives the cursor passing over
+  // iframes or other elements that would normally swallow mouse events.
+  (function () {
+    var header = panelEl.querySelector('header');
+    if (!header) return;
+    header.style.cursor = 'move';
+    header.style.userSelect = 'none';
+    header.style.touchAction = 'none';
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest('button')) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + 'px';
+      panelEl.style.top = startTop + 'px';
+      panelEl.style.right = 'auto';
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + 'px';
+      panelEl.style.top = newTop + 'px';
+    });
+    header.addEventListener('pointerup', function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener('pointercancel', function () { dragging = false; });
+  })();
+
   panelEl.querySelector('#' + P + 'close').addEventListener('click', function () { window[P + 'cleanup'](); });
   panelEl.querySelector('#' + P + 'copy').addEventListener('click', function (e) {
     var btn = e.currentTarget;

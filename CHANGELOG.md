@@ -15,7 +15,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `role="heading"` with no `aria-level`.
   - `aria-level` out of the 1–6 range.
   - `aria-level` overriding the native `<hN>` level (shown as informational, not flagged).
+- **Landmarks check.** Reports page-region landmarks (banner, navigation, main, complementary, contentinfo, region, search, form) from both HTML5 sectioning elements and explicit `role="…"` attributes. Hotkey: **Alt+L**. Applies the correct nesting rules: `<header>`/`<footer>` only count as banner/contentinfo when not nested inside `<article>`/`<aside>`/`<main>`/`<nav>`/`<section>`; `<section>`/`<form>` only become landmarks when they have an accessible name (via `aria-labelledby` or `aria-label`). Per-role chip colours in the panel. Flags:
+  - Multiple `<main>` landmarks on a single page.
+  - `role="region"` without an accessible name.
+  - Multiple landmarks of the same role with no accessible name, or sharing the same name (AT can't tell them apart).
+  - Candidates that didn't qualify as landmarks (e.g. `<section>` without a name) are listed under a collapsible "Non-landmark candidates" section so they're not silently invisible.
+- **Issue messages now reference every involved element.** When a single issue spans multiple elements (multiple `<h1>`, multiple unnamed same-role landmarks, skipped heading level pointing back to an earlier heading), each row now lists the related element indices inline. The panel uses compact form — `multiple h1 on page (also: #5, #8)` — and the Markdown table expands to include selectors — `multiple h1 on page (also: #5 \`#main > h1\`, #8 \`#sidebar > h1\`)` — so audit notes are self-contained.
 - **Popup-driven multi-check architecture.** The toolbar icon now opens a popup listing every check. The popup shows whether an inspection is currently displayed on the page and offers a Close button. Each check still works as a one-keystroke hotkey (Alt+A for names, Alt+H for headings) that skips the popup entirely.
+- **Draggable inspector panel.** Grab the panel's title bar to move it anywhere on screen — useful when the default top-right position covers the element you're inspecting. Uses pointer capture so the drag survives crossing iframes and other elements that would otherwise swallow mouse events. Buttons inside the title bar (Close, Copy MD) still receive clicks normally. The bookmarklet panel is also draggable.
 - Extension renamed to **AccessibleName Inspector** to reflect its expansion beyond names. Existing Firefox extension ID (`a11y-names@cnib.ca`) is preserved so updates land in place.
 
 ### Changed

@@ -28,6 +28,10 @@
     "run-headings": {
       "suggested_key": { "default": "Alt+H" },
       "description": "Inspect heading structure"
+    },
+    "run-landmarks": {
+      "suggested_key": { "default": "Alt+L" },
+      "description": "Inspect landmarks / page regions"
     }
   },
   "browser_specific_settings": {

@@ -3,8 +3,14 @@
   "name": "AccessibleName Inspector",
   "version": "1.1.0",
   "description": "Multi-check accessibility inspector: accessible names, headings, and more. Reports across iframes (including cross-origin) and shadow DOM. No network calls.",
-  "permissions": ["activeTab", "scripting", "tabs"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "action": {
     "default_title": "AccessibleName Inspector",
     "default_popup": "popup.html",
@@ -26,12 +32,22 @@
   },
   "commands": {
     "run-names": {
-      "suggested_key": { "default": "Alt+A" },
+      "suggested_key": {
+        "default": "Alt+A"
+      },
       "description": "Scan accessible names"
     },
     "run-headings": {
-      "suggested_key": { "default": "Alt+H" },
+      "suggested_key": {
+        "default": "Alt+H"
+      },
       "description": "Inspect heading structure"
+    },
+    "run-landmarks": {
+      "suggested_key": {
+        "default": "Alt+L"
+      },
+      "description": "Inspect landmarks / page regions"
     }
   }
 }

@@ -9,7 +9,8 @@ const api = typeof browser !== "undefined" ? browser : chrome;
 
 const CHECK_LABELS = {
   names: "Accessible Names",
-  headings: "Headings"
+  headings: "Headings",
+  landmarks: "Landmarks"
 };
 
 async function getActiveTab() {

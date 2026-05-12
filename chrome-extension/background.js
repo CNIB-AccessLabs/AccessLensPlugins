@@ -21,8 +21,9 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
 
 const CHECKS = {
-  names:    { label: "Accessible Names", scan: scanNames,    display: displayNames    },
-  headings: { label: "Headings",         scan: scanHeadings, display: displayHeadings }
+  names:     { label: "Accessible Names", scan: scanNames,     display: displayNames     },
+  headings:  { label: "Headings",         scan: scanHeadings,  display: displayHeadings  },
+  landmarks: { label: "Landmarks",        scan: scanLandmarks, display: displayLandmarks }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -46,8 +47,9 @@ api.commands.onCommand.addListener(async (cmd) => {
   try {
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     if (!tabs[0] || tabs[0].id == null) return;
-    if (cmd === "run-names")    await runCheck(tabs[0].id, "names");
-    if (cmd === "run-headings") await runCheck(tabs[0].id, "headings");
+    if (cmd === "run-names")     await runCheck(tabs[0].id, "names");
+    if (cmd === "run-headings")  await runCheck(tabs[0].id, "headings");
+    if (cmd === "run-landmarks") await runCheck(tabs[0].id, "landmarks");
   } catch (e) {
     console.error("[a11yn] command failed:", e);
   }
@@ -517,6 +519,50 @@ function displayNames(framesData, checkId) {
   });
   shadow.appendChild(panelEl);
 
+  // Make the panel draggable by its header. The user can move it off any
+  // element they want to inspect. Buttons inside the header still receive
+  // clicks normally — pointerdown on a button target is ignored.
+  // Uses setPointerCapture so the drag survives the cursor passing over
+  // iframes or other elements that would normally swallow mouse events.
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
@@ -727,20 +773,51 @@ function displayHeadings(framesData, checkId) {
   // Number in document order across frames (1-based).
   allResults.forEach(function (r, i) { r.index = i + 1; });
 
-  // Issue analysis
-  var h1Count = allResults.filter(function (r) { return r.level === 1; }).length;
+  // Issue analysis. Issues that involve OTHER elements (multiple h1, skipped
+  // level) carry their related element indices so the panel and Markdown
+  // output can reference all the involved elements, not just the current one.
+  var h1Indices = allResults.filter(function (r) { return r.level === 1; }).map(function (r) { return r.index; });
   var prevValidLevel = 0;
+  var prevValidIndex = null;
   allResults.forEach(function (r) {
     r.issues = [];
-    if (r.empty) r.issues.push("empty heading");
-    if (!r.isNative && r.level === null) r.issues.push('role="heading" with no aria-level');
-    if (r.level !== null && (r.level < 1 || r.level > 6)) r.issues.push("aria-level out of range (expected 1–6, got " + r.level + ")");
-    if (r.level !== null && r.level >= 1 && r.level <= 6 && prevValidLevel > 0 && r.level > prevValidLevel + 1) {
-      r.issues.push("level skipped (jumps from h" + prevValidLevel + " to h" + r.level + ")");
+    if (r.empty) r.issues.push({ text: "empty heading", related: [] });
+    if (!r.isNative && r.level === null) r.issues.push({ text: 'role="heading" with no aria-level', related: [] });
+    if (r.level !== null && (r.level < 1 || r.level > 6)) {
+      r.issues.push({ text: "aria-level out of range (expected 1–6, got " + r.level + ")", related: [] });
     }
-    if (r.level === 1 && h1Count > 1) r.issues.push("multiple h1 on page");
-    if (r.level !== null && r.level >= 1 && r.level <= 6) prevValidLevel = r.level;
+    if (r.level !== null && r.level >= 1 && r.level <= 6 && prevValidLevel > 0 && r.level > prevValidLevel + 1) {
+      r.issues.push({
+        text: "level skipped (jumps from h" + prevValidLevel + " at #" + prevValidIndex + " to h" + r.level + ")",
+        related: [prevValidIndex]
+      });
+    }
+    if (r.level === 1 && h1Indices.length > 1) {
+      r.issues.push({
+        text: "multiple h1 on page",
+        related: h1Indices.filter(function (i) { return i !== r.index; })
+      });
+    }
+    if (r.level !== null && r.level >= 1 && r.level <= 6) {
+      prevValidLevel = r.level;
+      prevValidIndex = r.index;
+    }
   });
+
+  // Helpers to render an issue with references to its related elements.
+  // Panel uses compact "#3, #7" form; Markdown adds the selector for each.
+  function fmtIssuePanel(issue) {
+    if (!issue.related || !issue.related.length) return issue.text;
+    return issue.text + " (also: " + issue.related.map(function (i) { return "#" + i; }).join(", ") + ")";
+  }
+  function fmtIssueMd(issue) {
+    if (!issue.related || !issue.related.length) return mdEsc(issue.text);
+    var refs = issue.related.map(function (i) {
+      var other = allResults[i - 1];
+      return "#" + i + " `" + mdEsc(other ? other.selector : "") + "`";
+    });
+    return mdEsc(issue.text) + " (also: " + refs.join(", ") + ")";
+  }
 
   // Resolve element references for outline + click-to-scroll
   allResults.forEach(function (r) {
@@ -836,7 +913,7 @@ function displayHeadings(framesData, checkId) {
   allResults.forEach(function (r) {
     var levelStr = r.level !== null ? ("H" + r.level + (r.levelSource === "aria-level" ? " *(aria)*" : "")) : "**?**";
     var text = r.empty ? "*(empty)*" : mdEsc(r.text);
-    var issues = r.issues.length ? "⚠ " + mdEsc(r.issues.join("; ")) : "";
+    var issues = r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "";
     var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
     md += "| " + r.index + " | " + frameLabel + " | " + levelStr + " | `" + r.tag + "` | " + text + " | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
   });
@@ -853,7 +930,7 @@ function displayHeadings(framesData, checkId) {
       level: r.level !== null ? "H" + r.level + (r.levelSource === "aria-level" ? " (aria)" : "") : "?",
       tag: r.tag,
       heading: r.empty ? "(empty)" : r.text,
-      issues: r.issues.join("; ")
+      issues: r.issues.map(fmtIssuePanel).join("; ")
     };
   }));
   console.log("%cMarkdown table:", "font-weight:bold");
@@ -913,7 +990,7 @@ function displayHeadings(framesData, checkId) {
       '<div class="body">' +
         '<div class="meta">' + location + "<code>" + esc(r.tag) + "</code>" + levelExplain + "</div>" +
         '<div class="text' + (r.empty ? " empty" : "") + '">' + (r.empty ? "(empty heading)" : esc(r.text)) + "</div>" +
-        (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.join("; ")) + "</div>" : "") +
+        (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.map(fmtIssuePanel).join("; ")) + "</div>" : "") +
         '<div class="src">' + esc(r.selector) + "</div>" +
       "</div>";
 
@@ -935,6 +1012,648 @@ function displayHeadings(framesData, checkId) {
     list.appendChild(li);
   });
   shadow.appendChild(panelEl);
+
+  // Make the panel draggable by its header. The user can move it off any
+  // element they want to inspect. Buttons inside the header still receive
+  // clicks normally — pointerdown on a button target is ignored.
+  // Uses setPointerCapture so the drag survives the cursor passing over
+  // iframes or other elements that would normally swallow mouse events.
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allResults.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+}
+
+/* ====================================================================
+ * CHECK: LANDMARKS — landmark / page-region inspector
+ *
+ * Reports both implicit (HTML5 sectioning) landmarks and explicit ARIA
+ * role landmarks, applying the correct nesting rules:
+ *
+ *   <header>  → banner          if NOT nested inside article/aside/main/nav/section
+ *   <footer>  → contentinfo     if NOT nested inside article/aside/main/nav/section
+ *   <nav>     → navigation      always
+ *   <main>    → main            always
+ *   <aside>   → complementary   always
+ *   <search>  → search          always (HTML 2024+ element)
+ *   <section> → region          only when it has an accessible name
+ *   <form>    → form            only when it has an accessible name
+ *   [role=…]  → that role       any of the eight landmark roles
+ *
+ * Issues flagged:
+ *   - Multiple <main> on a page
+ *   - role="region" without an accessible name (region requires a name)
+ *   - Multiple landmarks of the same role without distinct names
+ *     (auditors can't tell them apart with a screen reader)
+ *
+ * Accessible name uses only aria-labelledby and aria-label. Some AT use
+ * the first heading inside a landmark as an implicit label, but this is
+ * inconsistent and out of scope for v1.
+ * ==================================================================== */
+
+function scanLandmarks() {
+  "use strict";
+  try {
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        if (!win) return false;
+        var st = win.getComputedStyle(el);
+        return st.display === "none" || st.visibility === "hidden";
+      } catch (e) { return false; }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    function landmarkAccName(el) {
+      var aLab = el.getAttribute("aria-labelledby");
+      if (aLab) {
+        var doc = el.ownerDocument || document;
+        var root = el.getRootNode ? el.getRootNode() : doc;
+        var parts = aLab.split(/\s+/).map(function (id) {
+          var ref = (root.getElementById && root.getElementById(id)) || doc.getElementById(id);
+          return ref ? txt(ref.textContent) : "";
+        }).filter(Boolean);
+        if (parts.length) return { name: parts.join(" "), src: "aria-labelledby" };
+      }
+      var aL = el.getAttribute("aria-label");
+      if (aL && aL.trim()) return { name: aL.trim(), src: "aria-label" };
+      return { name: "", src: "" };
+    }
+
+    function isInsideSectioningContent(el) {
+      var cur = el.parentElement;
+      while (cur) {
+        var t = cur.tagName.toLowerCase();
+        if (t === "article" || t === "aside" || t === "main" || t === "nav" || t === "section") return true;
+        cur = cur.parentElement;
+      }
+      return false;
+    }
+
+    var LANDMARK_ROLES = /^(banner|navigation|main|complementary|contentinfo|region|search|form)$/;
+
+    function effectiveRole(el, accname) {
+      var explicit = el.getAttribute("role");
+      if (explicit) {
+        // Pick the first landmark role from the role attribute (space-separated).
+        var roles = explicit.split(/\s+/);
+        for (var i = 0; i < roles.length; i++) {
+          if (LANDMARK_ROLES.test(roles[i])) {
+            return { role: roles[i], explicit: true, note: null };
+          }
+        }
+      }
+      var tag = el.tagName.toLowerCase();
+      if (tag === "nav")    return { role: "navigation",    explicit: false, note: null };
+      if (tag === "main")   return { role: "main",          explicit: false, note: null };
+      if (tag === "aside")  return { role: "complementary", explicit: false, note: null };
+      if (tag === "search") return { role: "search",        explicit: false, note: null };
+      if (tag === "header") {
+        if (isInsideSectioningContent(el)) {
+          return { role: null, explicit: false, note: "<header> inside sectioning content has no landmark role" };
+        }
+        return { role: "banner", explicit: false, note: null };
+      }
+      if (tag === "footer") {
+        if (isInsideSectioningContent(el)) {
+          return { role: null, explicit: false, note: "<footer> inside sectioning content has no landmark role" };
+        }
+        return { role: "contentinfo", explicit: false, note: null };
+      }
+      if (tag === "section") {
+        if (accname.name) return { role: "region", explicit: false, note: null };
+        return { role: null, explicit: false, note: "<section> without accessible name is not a landmark" };
+      }
+      if (tag === "form") {
+        if (accname.name) return { role: "form", explicit: false, note: null };
+        return { role: null, explicit: false, note: "<form> without accessible name is not a landmark" };
+      }
+      return { role: null, explicit: false, note: null };
+    }
+
+    var SELECTOR = [
+      "header", "nav", "main", "aside", "footer", "section", "form", "search",
+      '[role~="banner"]', '[role~="navigation"]', '[role~="main"]',
+      '[role~="complementary"]', '[role~="contentinfo"]', '[role~="region"]',
+      '[role~="search"]', '[role~="form"]'
+    ].join(",");
+
+    var results = [];
+    var seenEls = new Set();
+    var shadowRoots = 0;
+    var skipped = [];
+
+    function walk(root) {
+      var matches;
+      try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
+      Array.prototype.forEach.call(matches, function (el) {
+        if (seenEls.has(el)) return;
+        seenEls.add(el);
+        if (isHidden(el)) return;
+        var r;
+        try { r = el.getBoundingClientRect(); } catch (e) { return; }
+        var accname = landmarkAccName(el);
+        var role = effectiveRole(el, accname);
+        if (role.role === null) {
+          if (role.note) {
+            skipped.push({
+              tag: el.tagName.toLowerCase(),
+              note: role.note,
+              selector: uniqueSelector(el)
+            });
+          }
+          return;
+        }
+        results.push({
+          tag: el.tagName.toLowerCase(),
+          role: role.role,
+          roleExplicit: role.explicit,
+          name: accname.name,
+          nameSrc: accname.src,
+          selector: uniqueSelector(el),
+          rect: { top: r.top, left: r.left, width: r.width, height: r.height }
+        });
+      });
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      Array.prototype.forEach.call(all, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document);
+
+    // Sort by visual order within the frame
+    results.sort(function (a, b) {
+      if (a.rect.top !== b.rect.top) return a.rect.top - b.rect.top;
+      return a.rect.left - b.rect.left;
+    });
+
+    return {
+      url: window.location.href,
+      isTop: window === window.top,
+      results: results,
+      shadowRoots: shadowRoots,
+      skipped: skipped
+    };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
+  }
+}
+
+function displayLandmarks(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  var allResults = [];
+  var allSkipped = [];
+  var unmatchedFrames = 0;
+  var frameLabelByUrl = new Map();
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    var offX = 0, offY = 0, positioned = true, inFrame = !frame.isTop;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    (frame.results || []).forEach(function (r) {
+      allResults.push({
+        tag: r.tag, role: r.role, roleExplicit: r.roleExplicit,
+        name: r.name, nameSrc: r.nameSrc,
+        selector: r.selector,
+        frameUrl: frame.url,
+        frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
+        isTop: !inFrame,
+        pageTop: window.scrollY + offY + r.rect.top,
+        pageLeft: window.scrollX + offX + r.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      });
+    });
+    (frame.skipped || []).forEach(function (s) { allSkipped.push(s); });
+  });
+  allResults.forEach(function (r, i) { r.index = i + 1; });
+
+  // Issues. Issues that involve other elements carry their related indices so
+  // the panel and Markdown output can reference every involved element, not
+  // just the current one.
+  var byRole = {};
+  allResults.forEach(function (r) {
+    if (!byRole[r.role]) byRole[r.role] = [];
+    byRole[r.role].push(r);
+  });
+
+  allResults.forEach(function (r) {
+    r.issues = [];
+    if (r.role === "main" && byRole["main"].length > 1) {
+      r.issues.push({
+        text: "multiple main landmarks on page (only one expected)",
+        related: byRole["main"].filter(function (o) { return o.index !== r.index; }).map(function (o) { return o.index; })
+      });
+    }
+    if (r.role === "region" && !r.name) {
+      r.issues.push({ text: 'role="region" without an accessible name', related: [] });
+    }
+    if (byRole[r.role].length > 1 && !r.name) {
+      // Per WCAG 1.3.1 and ARIA Authoring Practices: when multiple landmarks
+      // share a role, EACH needs a distinguishing accessible name. So we flag
+      // every unnamed one in the cluster, regardless of whether the others are
+      // named or not. `related` references every other landmark of this role
+      // so the auditor sees the whole cluster.
+      r.issues.push({
+        text: "no accessible name, but there are " + byRole[r.role].length + " " + r.role + " landmarks on the page — each needs a distinguishing label",
+        related: byRole[r.role].filter(function (o) { return o.index !== r.index; }).map(function (o) { return o.index; })
+      });
+    }
+    if (byRole[r.role].length > 1 && r.name) {
+      var sameName = byRole[r.role].filter(function (o) { return o.name === r.name && o.index !== r.index; });
+      if (sameName.length) {
+        r.issues.push({
+          text: "multiple " + r.role + " landmarks share the same name '" + r.name + "'",
+          related: sameName.map(function (o) { return o.index; })
+        });
+      }
+    }
+  });
+
+  // Helpers to render an issue with references to its related elements.
+  // Panel uses compact "#3, #7" form; Markdown adds the selector for each.
+  function fmtIssuePanel(issue) {
+    if (!issue.related || !issue.related.length) return issue.text;
+    return issue.text + " (also: " + issue.related.map(function (i) { return "#" + i; }).join(", ") + ")";
+  }
+  function fmtIssueMd(issue) {
+    if (!issue.related || !issue.related.length) return mdEsc(issue.text);
+    var refs = issue.related.map(function (i) {
+      var other = allResults[i - 1];
+      return "#" + i + " `" + mdEsc(other ? other.selector : "") + "`";
+    });
+    return mdEsc(issue.text) + " (also: " + refs.join(", ") + ")";
+  }
+
+  // Try to resolve element references for outline + click-to-scroll
+  allResults.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var hasIssue = r.issues.length > 0;
+        var color = hasIssue ? "#b00020" : "#003876";
+        var style = hasIssue ? "dashed" : "solid";
+        el.style.setProperty("outline", "2px " + style + " " + color, "important");
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  // Shadow UI
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  // Role-specific chip colours
+  var ROLE_COLORS = {
+    banner:        "#37474f",
+    navigation:    "#003876",
+    main:          "#1b5e20",
+    complementary: "#6a1b9a",
+    contentinfo:   "#5d4037",
+    region:        "#ef6c00",
+    search:        "#00695c",
+    form:          "#0277bd"
+  };
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.issue{background:#b00020;}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:500px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .issue{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;display:flex;align-items:flex-start;gap:10px;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li .gutter{flex:0 0 auto;width:18px;color:#999;font-size:14px;text-align:right;}" +
+    ".panel li .rolechip{flex:0 0 auto;display:inline-block;min-width:100px;text-align:center;padding:4px 10px;border-radius:3px;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;}" +
+    ".panel li .body{flex:1 1 auto;min-width:0;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .name{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
+    ".panel li .name.unnamed{color:#666;font-style:italic;font-weight:400 !important;}" +
+    ".panel li .issues{color:#b00020;font-size:14px;margin-top:4px;font-weight:600 !important;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:2px;word-break:break-all;}" +
+    ".panel .skipped{padding:10px 14px;border-top:1px solid #eee;background:#fafafa;font-size:14px;color:#555;}" +
+    ".panel .skipped summary{cursor:pointer;font-weight:600 !important;}" +
+    ".panel .skipped ul{margin:6px 0 0 0;padding-left:18px;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  // Badges
+  var badges = [];
+  allResults.forEach(function (r) {
+    if (!r.positioned) return;
+    var badge = document.createElement("div");
+    var cls = "badge";
+    if (r.issues.length) cls += " issue";
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    var color = ROLE_COLORS[r.role] || "#003876";
+    badge.style.background = r.issues.length ? "#b00020" : color;
+    var prefix = r.isTop ? "" : "[frame] ";
+    var nameStr = r.name ? r.name : "(no name)";
+    badge.textContent = "#" + r.index + " " + prefix + r.role + ": " + nameStr;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  // Markdown
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  var md = "| # | Frame | Role | Tag | Accessible Name | Source | Issues | Selector |\n";
+  md += "|---|-------|------|-----|-----------------|--------|--------|----------|\n";
+  allResults.forEach(function (r) {
+    var roleStr = r.role + (r.roleExplicit ? " (explicit)" : "");
+    var name = r.name ? mdEsc(r.name) : "*(no name)*";
+    var issues = r.issues.length ? "⚠ " + r.issues.map(fmtIssueMd).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    md += "| " + r.index + " | " + frameLabel + " | " + roleStr + " | `" + r.tag + "` | " + name + " | " + (r.nameSrc || "") + " | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  var issueCount = allResults.filter(function (r) { return r.issues.length; }).length;
+  var frameCount = framesData.filter(function (f) { return !f.isTop && f.results && f.results.length; }).length;
+
+  console.group("%c[a11yn landmarks] " + allResults.length + " landmarks (" + issueCount + " with issues) — top doc + " + frameCount + " frame(s)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allResults.map(function (r) {
+    return {
+      "#": r.index,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      role: r.role + (r.roleExplicit ? " (explicit)" : ""),
+      tag: r.tag,
+      name: r.name || "(no name)",
+      issues: r.issues.map(fmtIssuePanel).join("; ")
+    };
+  }));
+  if (allSkipped.length) {
+    console.log("%cCandidates that didn't qualify as landmarks (" + allSkipped.length + "):", "font-weight:bold;color:#555");
+    console.table(allSkipped);
+  }
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel";
+
+  var summary = "";
+  if (allResults.length === 0) {
+    summary += '<span class="warn">No landmarks found on this page.</span>';
+  } else if (issueCount === 0) {
+    summary += '<span class="ok">All ' + allResults.length + ' landmark' + (allResults.length === 1 ? "" : "s") + ' look structurally valid.</span>';
+  } else {
+    summary += '<span class="issue">' + issueCount + " of " + allResults.length + " landmark" + (allResults.length === 1 ? "" : "s") + " have issues.</span>";
+  }
+  // Role inventory
+  var roleSummary = Object.keys(byRole).sort().map(function (role) {
+    var n = byRole[role].length;
+    return n + " " + role + (n === 1 ? "" : "s");
+  }).join(", ");
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
+  if (roleSummary) summary += roleSummary + " · ";
+  summary += "top doc";
+  if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
+  if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
+  if (allSkipped.length) summary += " · " + allSkipped.length + " non-landmark candidate(s)";
+  summary += '</div>';
+
+  panelEl.innerHTML =
+    "<header><strong>Landmarks (" + allResults.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<ol id="' + P + 'list"></ol>' +
+    (allSkipped.length
+      ? '<details class="skipped"><summary>Non-landmark candidates (' + allSkipped.length + ')</summary><ul>' +
+          allSkipped.map(function (s) {
+            return "<li><code>&lt;" + esc(s.tag) + "&gt;</code> — " + esc(s.note) + " <span style=\"color:#999\">(" + esc(s.selector) + ")</span></li>";
+          }).join("") +
+        '</ul></details>'
+      : "");
+
+  var list = panelEl.querySelector("#" + P + "list");
+  allResults.forEach(function (r) {
+    var li = document.createElement("li");
+    var chipColor = ROLE_COLORS[r.role] || "#003876";
+    var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+    var explicitNote = r.roleExplicit ? ' <span style="color:#555">(role="' + esc(r.role) + '")</span>' : "";
+    li.innerHTML =
+      '<span class="gutter">' + r.index + "</span>" +
+      '<span class="rolechip" style="background:' + chipColor + '">' + esc(r.role) + "</span>" +
+      '<div class="body">' +
+        '<div class="meta">' + location + "<code>&lt;" + esc(r.tag) + "&gt;</code>" + explicitNote + (r.nameSrc ? ' <span style="color:#999">· via ' + esc(r.nameSrc) + "</span>" : "") + "</div>" +
+        '<div class="name' + (r.name ? "" : " unnamed") + '">' + (r.name ? esc(r.name) : "(no accessible name)") + "</div>" +
+        (r.issues.length ? '<div class="issues">⚠ ' + esc(r.issues.map(fmtIssuePanel).join("; ")) + "</div>" : "") +
+        '<div class="src">' + esc(r.selector) + "</div>" +
+      "</div>";
+
+    li.addEventListener("click", function () {
+      try {
+        if (r._resolveEl) {
+          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        } else if (r.iframeEl) {
+          r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (r.badge) {
+          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        }
+      } catch (e) {}
+    });
+    list.appendChild(li);
+  });
+  shadow.appendChild(panelEl);
+
+  // Make the panel draggable by its header. The user can move it off any
+  // element they want to inspect. Buttons inside the header still receive
+  // clicks normally — pointerdown on a button target is ignored.
+  // Uses setPointerCapture so the drag survives the cursor passing over
+  // iframes or other elements that would normally swallow mouse events.
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
