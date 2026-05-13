@@ -32,7 +32,8 @@ const CHECKS = {
   forms:     { label: "Forms",            scan: scanForms,     display: displayForms     },
   tables:    { label: "Tables",           scan: scanTables,    display: displayTables    },
   iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   },
-  buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons }
+  buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons },
+  lists:     { label: "Lists",            scan: scanLists,     display: displayLists     }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -10701,6 +10702,829 @@ function displayButtons(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Buttons check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: LISTS — list semantics inspector (WCAG 1.3.1)
+ *
+ * Every <ul>, <ol>, <menu>, <dl>, and every [role="list"] container
+ * becomes a row. Orphan <li>/<dt>/<dd>/[role="listitem"] elements
+ * (those outside an appropriate list container) get their own rows.
+ *
+ * Per-row flags:
+ *   non-li-children          <ul>/<ol>/<menu> with non-<li> direct children
+ *                            (other than <script>/<template>)
+ *   orphan-li                <li> outside <ul>/<ol>/<menu> or [role="list"]
+ *   empty-list               container has no list items at all
+ *   empty-list-item          <li>/<dt>/<dd> with no text and no children
+ *   list-style-none-no-role  <ul>/<ol> with list-style:none and no
+ *                            explicit role="list" (Safari/VO strips
+ *                            list semantics)
+ *   role-presentation-on-list  role="presentation"/"none" on <ul>/<ol>
+ *                            (intentional strip; flagged informationally)
+ *   role-list-without-listitem-children
+ *                            [role="list"] on non-<ul>/<ol> host with
+ *                            children that don't have role="listitem"
+ *   role-listitem-orphan     [role="listitem"] without role="list" or
+ *                            <ul>/<ol> ancestor
+ *   dl-bad-children          <dl> with children other than
+ *                            <dt>/<dd>/<div>/<script>/<template>
+ *   dl-dt-no-dd              <dt> not followed by a <dd>
+ *   dl-dd-no-dt              <dd> not preceded by a <dt> in its group
+ * ==================================================================== */
+
+function scanLists() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+    var seen = new Set(); // track elements already added so orphan walk doesn't dup
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function tagOf(el) { return el && el.tagName ? el.tagName.toLowerCase() : ""; }
+
+    function roleOf(el) {
+      var r = (el.getAttribute && el.getAttribute("role")) || "";
+      r = r.trim().toLowerCase();
+      if (r.indexOf(" ") !== -1) r = r.split(/\s+/)[0];
+      return r;
+    }
+
+    function isPresentationRole(role) { return role === "presentation" || role === "none"; }
+
+    function isInsideList(el) {
+      // True if this <li> (or role=listitem) has a list container ancestor.
+      for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+        var t = tagOf(n);
+        if (t === "ul" || t === "ol" || t === "menu") return true;
+        if (roleOf(n) === "list") return true;
+      }
+      return false;
+    }
+
+    function isInsideDl(el) {
+      for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+        if (tagOf(n) === "dl") return true;
+      }
+      return false;
+    }
+
+    function listStyleIsNone(el) {
+      try {
+        var cs = getComputedStyle(el);
+        if (!cs) return false;
+        return cs.listStyleType === "none";
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function isItemEmpty(el) {
+      if (!el) return false;
+      var t = txt(el);
+      if (t) return false;
+      // Any element children?
+      for (var i = 0; i < el.children.length; i++) {
+        var c = el.children[i];
+        var tn = tagOf(c);
+        if (tn === "img" && c.getAttribute("alt")) return false;
+        if (tn === "input" || tn === "button" || tn === "a" || tn === "select" || tn === "textarea") return false;
+      }
+      // No text and no meaningful children
+      return el.children.length === 0;
+    }
+
+    function firstItemSample(container, itemTagSet) {
+      for (var i = 0; i < container.children.length; i++) {
+        var c = container.children[i];
+        var tn = tagOf(c);
+        if (itemTagSet[tn]) {
+          var t = txt(c);
+          if (t) return t.length > 60 ? t.slice(0, 60) + "…" : t;
+        }
+      }
+      return "";
+    }
+
+    /* ---- analyse <ul>/<ol>/<menu> ---- */
+    function analyseListContainer(el) {
+      var t = tagOf(el);
+      var role = roleOf(el);
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: t,
+        role: role,
+        category: t,
+        itemCount: 0,
+        listStyleNone: false,
+        sampleText: "",
+        hidden: isHidden(el),
+        issues: [],
+        _resolveSel: ""
+      };
+      entry._resolveSel = entry.sel;
+      seen.add(el);
+
+      // Direct children analysis.
+      var liChildren = 0;
+      var badChildren = [];
+      for (var i = 0; i < el.children.length; i++) {
+        var c = el.children[i];
+        var ct = tagOf(c);
+        if (ct === "li") {
+          liChildren++;
+          if (isItemEmpty(c)) {
+            entry.issues.push({
+              type: "empty-list-item",
+              text: "Empty <li> at " + uniqueSelector(c)
+            });
+          }
+          seen.add(c);
+        } else if (ct === "script" || ct === "template") {
+          // allowed
+        } else {
+          badChildren.push(ct);
+        }
+      }
+      entry.itemCount = liChildren;
+      entry.sampleText = firstItemSample(el, { li: 1 });
+
+      if (badChildren.length) {
+        entry.issues.push({
+          type: "non-li-children",
+          text: "<" + t + "> has " + badChildren.length + " direct child(ren) that are not <li>: <" + badChildren.join(">, <") + ">. Breaks list semantics."
+        });
+      }
+      if (liChildren === 0) {
+        entry.issues.push({
+          type: "empty-list",
+          text: "<" + t + "> contains no <li> items."
+        });
+      }
+
+      // role="presentation"/"none" on natural list?
+      if (isPresentationRole(role)) {
+        entry.issues.push({
+          type: "role-presentation-on-list",
+          text: "<" + t + " role=\"" + role + "\"> intentionally strips list semantics. SR users won't be told this is a list. Verify intent."
+        });
+      }
+
+      // list-style:none without explicit role="list"?
+      entry.listStyleNone = listStyleIsNone(el);
+      if (entry.listStyleNone && role !== "list" && !isPresentationRole(role)) {
+        entry.issues.push({
+          type: "list-style-none-no-role",
+          text: "<" + t + "> has list-style:none and no role=\"list\". Safari/VoiceOver strips list semantics when bullets are removed via CSS — add role=\"list\" to keep the list announced."
+        });
+      }
+
+      return entry;
+    }
+
+    /* ---- analyse <dl> ---- */
+    function analyseDl(el) {
+      var role = roleOf(el);
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: "dl",
+        role: role,
+        category: "dl",
+        itemCount: 0,
+        listStyleNone: false,
+        sampleText: "",
+        hidden: isHidden(el),
+        issues: [],
+        _resolveSel: ""
+      };
+      entry._resolveSel = entry.sel;
+      seen.add(el);
+
+      // Direct children — allowed: dt, dd, div (HTML5 wrapper), script, template
+      var groups = []; // array of {dts:[], dds:[]} per group
+      var current = { dts: [], dds: [] };
+      var badChildren = [];
+
+      function consumeGroup(g) {
+        if (g.dts.length === 0 && g.dds.length === 0) return;
+        groups.push(g);
+      }
+
+      function processItem(node) {
+        var tn = tagOf(node);
+        if (tn === "dt") {
+          if (current.dds.length > 0) {
+            // dd seen earlier; start a new group on this new dt
+            consumeGroup(current);
+            current = { dts: [], dds: [] };
+          }
+          current.dts.push(node);
+          seen.add(node);
+          if (isItemEmpty(node)) entry.issues.push({ type: "empty-list-item", text: "Empty <dt> at " + uniqueSelector(node) });
+        } else if (tn === "dd") {
+          current.dds.push(node);
+          seen.add(node);
+          if (isItemEmpty(node)) entry.issues.push({ type: "empty-list-item", text: "Empty <dd> at " + uniqueSelector(node) });
+        }
+      }
+
+      for (var i = 0; i < el.children.length; i++) {
+        var c = el.children[i];
+        var ct = tagOf(c);
+        if (ct === "dt" || ct === "dd") {
+          processItem(c);
+        } else if (ct === "div") {
+          // Per HTML5, a <div> child of <dl> can wrap one or more dt+dd pairs.
+          // Treat its dt/dd descendants as part of this group then reset.
+          consumeGroup(current);
+          current = { dts: [], dds: [] };
+          for (var j = 0; j < c.children.length; j++) {
+            processItem(c.children[j]);
+          }
+          consumeGroup(current);
+          current = { dts: [], dds: [] };
+        } else if (ct === "script" || ct === "template") {
+          // allowed
+        } else {
+          badChildren.push(ct);
+        }
+      }
+      consumeGroup(current);
+
+      // Now check each group.
+      for (var g = 0; g < groups.length; g++) {
+        if (groups[g].dts.length > 0 && groups[g].dds.length === 0) {
+          entry.issues.push({
+            type: "dl-dt-no-dd",
+            text: "<dt> not followed by any <dd>: " + groups[g].dts.map(function (n) { return uniqueSelector(n); }).join(", ")
+          });
+        }
+        if (groups[g].dts.length === 0 && groups[g].dds.length > 0) {
+          entry.issues.push({
+            type: "dl-dd-no-dt",
+            text: "<dd> with no preceding <dt>: " + groups[g].dds.map(function (n) { return uniqueSelector(n); }).join(", ")
+          });
+        }
+      }
+
+      if (badChildren.length) {
+        entry.issues.push({
+          type: "dl-bad-children",
+          text: "<dl> has " + badChildren.length + " direct child(ren) that are not <dt>/<dd>/<div>: <" + badChildren.join(">, <") + ">."
+        });
+      }
+
+      var totalDt = 0, totalDd = 0;
+      for (var k = 0; k < groups.length; k++) {
+        totalDt += groups[k].dts.length;
+        totalDd += groups[k].dds.length;
+      }
+      entry.itemCount = totalDt + totalDd;
+      // sample = first dt text if any
+      for (var s = 0; s < groups.length; s++) {
+        if (groups[s].dts.length > 0) {
+          var sampleNode = groups[s].dts[0];
+          var ts = txt(sampleNode);
+          if (ts) { entry.sampleText = ts.length > 60 ? ts.slice(0, 60) + "…" : ts; break; }
+        }
+      }
+      if (entry.itemCount === 0) {
+        entry.issues.push({
+          type: "empty-list",
+          text: "<dl> contains no <dt>/<dd> items."
+        });
+      }
+      return entry;
+    }
+
+    /* ---- analyse role="list" container on non-natural host ---- */
+    function analyseAriaList(el) {
+      var role = roleOf(el);
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: tagOf(el),
+        role: role,
+        category: "aria-list",
+        itemCount: 0,
+        listStyleNone: false,
+        sampleText: "",
+        hidden: isHidden(el),
+        issues: [],
+        _resolveSel: ""
+      };
+      entry._resolveSel = entry.sel;
+      seen.add(el);
+
+      var listitemChildren = 0;
+      var bad = [];
+      for (var i = 0; i < el.children.length; i++) {
+        var c = el.children[i];
+        if (roleOf(c) === "listitem") {
+          listitemChildren++;
+          seen.add(c);
+        } else {
+          bad.push(tagOf(c));
+        }
+      }
+      entry.itemCount = listitemChildren;
+      if (listitemChildren === 0) {
+        entry.issues.push({
+          type: "empty-list",
+          text: "[role=\"list\"] has no role=\"listitem\" children."
+        });
+      } else if (bad.length > 0) {
+        entry.issues.push({
+          type: "role-list-without-listitem-children",
+          text: "[role=\"list\"] has " + bad.length + " direct child(ren) without role=\"listitem\": <" + bad.join(">, <") + ">."
+        });
+      }
+      return entry;
+    }
+
+    /* ---- orphan analyses ---- */
+    function analyseOrphan(el, kind) {
+      var role = roleOf(el);
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: tagOf(el),
+        role: role,
+        category: kind,
+        itemCount: 0,
+        listStyleNone: false,
+        sampleText: txt(el).slice(0, 60),
+        hidden: isHidden(el),
+        issues: [],
+        _resolveSel: ""
+      };
+      entry._resolveSel = entry.sel;
+      seen.add(el);
+
+      if (kind === "orphan-li") {
+        entry.issues.push({
+          type: "orphan-li",
+          text: "<li> outside any <ul>/<ol>/<menu> or [role=\"list\"] ancestor."
+        });
+      } else if (kind === "orphan-listitem") {
+        entry.issues.push({
+          type: "role-listitem-orphan",
+          text: "[role=\"listitem\"] without a <ul>/<ol> or [role=\"list\"] ancestor."
+        });
+      } else if (kind === "orphan-dt") {
+        entry.issues.push({
+          type: "dl-dd-no-dt",
+          text: "<dt> outside any <dl>."
+        });
+      } else if (kind === "orphan-dd") {
+        entry.issues.push({
+          type: "dl-dd-no-dt",
+          text: "<dd> outside any <dl>."
+        });
+      }
+      return entry;
+    }
+
+    /* ---- walk ---- */
+    function walk(root) {
+      if (!root) return;
+      var containers;
+      try {
+        containers = root.querySelectorAll('ul, ol, menu, dl, [role="list"]');
+      } catch (e) { containers = []; }
+      for (var i = 0; i < containers.length; i++) {
+        var el = containers[i];
+        if (seen.has(el)) continue;
+        var t = tagOf(el);
+        if (t === "ul" || t === "ol" || t === "menu") {
+          results.push(analyseListContainer(el));
+        } else if (t === "dl") {
+          results.push(analyseDl(el));
+        } else if (roleOf(el) === "list") {
+          // role="list" on something other than ul/ol — treat as aria-list
+          results.push(analyseAriaList(el));
+        }
+      }
+
+      // Orphan items.
+      var li;
+      try { li = root.querySelectorAll("li"); } catch (e) { li = []; }
+      for (var j = 0; j < li.length; j++) {
+        if (seen.has(li[j])) continue;
+        if (!isInsideList(li[j])) {
+          results.push(analyseOrphan(li[j], "orphan-li"));
+        }
+      }
+      var listitem;
+      try { listitem = root.querySelectorAll('[role="listitem"]'); } catch (e) { listitem = []; }
+      for (var k = 0; k < listitem.length; k++) {
+        if (seen.has(listitem[k])) continue;
+        if (!isInsideList(listitem[k])) {
+          results.push(analyseOrphan(listitem[k], "orphan-listitem"));
+        }
+      }
+      var dts;
+      try { dts = root.querySelectorAll("dt"); } catch (e) { dts = []; }
+      for (var m = 0; m < dts.length; m++) {
+        if (seen.has(dts[m])) continue;
+        if (!isInsideDl(dts[m])) results.push(analyseOrphan(dts[m], "orphan-dt"));
+      }
+      var dds;
+      try { dds = root.querySelectorAll("dd"); } catch (e) { dds = []; }
+      for (var n = 0; n < dds.length; n++) {
+        if (seen.has(dds[n])) continue;
+        if (!isInsideDl(dds[n])) results.push(analyseOrphan(dds[n], "orphan-dd"));
+      }
+
+      // Shadow DOM recursion.
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var q = 0; q < all.length; q++) {
+        if (all[q].shadowRoot) {
+          shadowRoots++;
+          walk(all[q].shadowRoot);
+        }
+      }
+    }
+
+    walk(document);
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayLists(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    // Resolve elements in top frame.
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var ulCount = 0, dlCount = 0, ariaListCount = 0, orphanCount = 0, singleItem = 0, withIssues = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.category === "ul" || c.category === "ol" || c.category === "menu") ulCount++;
+      else if (c.category === "dl") dlCount++;
+      else if (c.category === "aria-list") ariaListCount++;
+      else orphanCount++;
+      if (c.itemCount === 1 && (c.category === "ul" || c.category === "ol" || c.category === "menu" || c.category === "aria-list")) singleItem++;
+      if (c.issues && c.issues.length) withIssues++;
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 500px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.ul { background: #1a7f1a; color: #fff; }' +
+      '.chip.dl { background: #6f42c1; color: #fff; }' +
+      '.chip.aria { background: #d97706; color: #fff; }' +
+      '.chip.orphan { background: #b00020; color: #fff; }' +
+      '.chip.hidden { background: #707070; color: #fff; }' +
+      '.chip.style { background: #555; color: #fff; font-weight: 500; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.sample { color: #303030; font-size: 14px; margin-top: 4px; font-style: italic; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-ulol li.row:not(.is-ulol) { display: none; }' +
+      '.panel.filter-dl li.row:not(.is-dl) { display: none; }' +
+      '.panel.filter-aria li.row:not(.is-aria) { display: none; }' +
+      '.panel.filter-single li.row:not(.is-single) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Lists (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      ulCount + " <ul>/<ol>/<menu>",
+      dlCount + " <dl>",
+      ariaListCount ? (ariaListCount + " ARIA list") : null,
+      orphanCount ? (orphanCount + " orphan") : null,
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="ulol">&lt;ul&gt;/&lt;ol&gt; (' + ulCount + ')</button>' +
+            '<button data-filter="dl">&lt;dl&gt; (' + dlCount + ')</button>' +
+            '<button data-filter="aria">ARIA lists (' + ariaListCount + ')</button>' +
+            '<button data-filter="single">Single-item (' + singleItem + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.category === "ul" || t.category === "ol" || t.category === "menu") classes.push("is-ulol");
+      else if (t.category === "dl") classes.push("is-dl");
+      else if (t.category === "aria-list") classes.push("is-aria");
+      else classes.push("is-orphan");
+      if (t.itemCount === 1 && (t.category === "ul" || t.category === "ol" || t.category === "menu" || t.category === "aria-list")) classes.push("is-single");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      var chipClass = "ul";
+      var chipLabel = "&lt;" + t.tag + "&gt;";
+      if (t.category === "dl") chipClass = "dl";
+      else if (t.category === "aria-list") { chipClass = "aria"; chipLabel = "&lt;" + t.tag + " role=\"list\"&gt;"; }
+      else if (t.category === "orphan-li" || t.category === "orphan-listitem" || t.category === "orphan-dt" || t.category === "orphan-dd") {
+        chipClass = "orphan";
+        chipLabel = "ORPHAN " + chipLabel;
+      }
+      if (t.role && t.category !== "aria-list" && !chipLabel.indexOf("role=") < 0) {
+        chipLabel += ' role="' + esc(t.role) + '"';
+      }
+      html += '<span class="chip ' + chipClass + '">' + chipLabel + '</span>';
+
+      if (t.listStyleNone) {
+        html += '<span class="chip style">list-style: none</span>';
+      }
+      if (t.hidden) html += '<span class="chip hidden">HIDDEN</span>';
+
+      // item count + sample
+      var metaParts = [];
+      if (t.category === "ul" || t.category === "ol" || t.category === "menu" || t.category === "aria-list") {
+        metaParts.push(t.itemCount + " item" + (t.itemCount === 1 ? "" : "s"));
+      } else if (t.category === "dl") {
+        metaParts.push(t.itemCount + " dt/dd entries");
+      }
+      if (t._frameUrl && !t._frameIsTop) metaParts.push("in frame");
+      if (metaParts.length) html += '<div class="meta">' + esc(metaParts.join(" · ")) + '</div>';
+
+      if (t.sampleText) html += '<div class="sample">First item: ' + esc(t.sampleText) + '</div>';
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 1.3.1 Info and Relationships · List semantics inventory</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    // Click a row to scroll the element into view and flash it.
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    // Outline top-frame containers.
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = (o.issues && o.issues.length) ? "#b00020" : "#003876";
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Lists\n\n";
+    md += "Counts: " + ulCount + " <ul>/<ol>/<menu>, " + dlCount + " <dl>";
+    if (ariaListCount) md += ", " + ariaListCount + " ARIA list";
+    if (orphanCount) md += ", " + orphanCount + " orphan";
+    md += ", " + withIssues + " with issues.\n\n";
+    md += "| # | Tag | Role | Items | list-style:none | Issues | Selector | First item |\n";
+    md += "|---|-----|------|-------|-----------------|--------|----------|------------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | <" + mt.tag + ">" +
+            " | " + (mt.role || "") +
+            " | " + mt.itemCount +
+            " | " + (mt.listStyleNone ? "yes" : "") +
+            " | " + issueStr +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "`" +
+            " | " + (mt.sampleText || "").replace(/\|/g, "\\|") +
+            " |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Lists check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}

@@ -21,7 +21,8 @@ const CHECK_LABELS = {
   forms: "Forms",
   tables: "Tables",
   iframes: "Iframes",
-  buttons: "Buttons & interactive"
+  buttons: "Buttons & interactive",
+  lists: "Lists"
 };
 
 async function getActiveTab() {

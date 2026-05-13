@@ -91,6 +91,12 @@
       </button>
       <p class="desc">WCAG 2.1.1, 4.1.2, 3.3.1/3.3.2. Inventory of every &lt;button&gt;, every &lt;a&gt;, every interactive-role element, and every non-interactive element with inline interaction handlers. Flags &lt;button&gt; inside &lt;form&gt; without explicit type= (defaults to submit), type="reset" (rarely what the user wants), &lt;a href="#"&gt; / href="javascript:" used as buttons, &lt;a&gt; without href, &lt;a disabled&gt; (no effect on links), &lt;a href&gt; with onclick that preventDefault's, &lt;div&gt;/&lt;span&gt; with onclick and no role/tabindex (keyboard-unreachable), interactive ARIA role on non-focusable host with no tabindex, interactive role + onclick but no inline onkey* (heuristic), aria-pressed on non-button, aria-expanded on roles that don't support it, and aria-haspopup without aria-expanded (popup state not exposed). Note: handlers wired via addEventListener can't be statically inspected.</p>
     </li>
+    <li>
+      <button class="check" data-check="lists">
+        <span class="label">Lists</span>
+      </button>
+      <p class="desc">WCAG 1.3.1. Inventory of every &lt;ul&gt;, &lt;ol&gt;, &lt;menu&gt;, &lt;dl&gt;, and every [role="list"] container, plus orphan &lt;li&gt;/&lt;dt&gt;/&lt;dd&gt;/[role="listitem"]. Flags non-&lt;li&gt; direct children of &lt;ul&gt;/&lt;ol&gt;, orphan &lt;li&gt;, empty lists, empty list items, &lt;ul&gt;/&lt;ol&gt; with list-style:none and no role="list" (Safari/VoiceOver quirk that strips list semantics), role="presentation"/"none" on natural lists (intentional strip; flagged informationally), [role="list"] without role="listitem" children, orphan role="listitem", &lt;dl&gt; with bad direct children, and broken dt/dd pairing (dt with no dd, dd with no dt).</p>
+    </li>
   </ul>
 </section>
 <footer>

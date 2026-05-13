@@ -34,6 +34,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **non-interactive** — element has tabindex but no native interactive role and no interactive ARIA role; verify keyboard handlers (Enter/Space) are wired up.
   - **interactive-skipped** — natively interactive element has `tabindex="-1"`; deliberately removed from the tab order, worth a second look.
   - **invalid-value** — tabindex attribute is not a parseable integer.
+- **Lists check.** WCAG 1.3.1 Info and Relationships. One row per `<ul>`, `<ol>`, `<menu>`, `<dl>`, and `[role="list"]` container, plus rows for orphan `<li>`/`<dt>`/`<dd>`/`[role="listitem"]` (items that aren't inside an appropriate list container). Each row shows the element + role chip, a "list-style: none" indicator when present, item count, the first item's text as a sample, and unique selector.
+  - **non-li-children** — `<ul>`/`<ol>`/`<menu>` with direct children that aren't `<li>` (other than `<script>`/`<template>`).
+  - **orphan-li** — `<li>` outside any `<ul>`/`<ol>`/`<menu>` or `[role="list"]` ancestor.
+  - **empty-list** — `<ul>`/`<ol>`/`<dl>`/`[role="list"]` with no list items.
+  - **empty-list-item** — `<li>`/`<dt>`/`<dd>` with no text and no children.
+  - **list-style-none-no-role** — `<ul>`/`<ol>` with computed `list-style: none` and no explicit `role="list"`. Safari/VoiceOver strips list semantics when bullets are removed via CSS; this is the standard workaround prompt.
+  - **role-presentation-on-list** — `role="presentation"`/`"none"` on a natural list element. Intentionally strips list semantics; flagged so the auditor confirms intent.
+  - **role-list-without-listitem-children** — `[role="list"]` on a non-`<ul>`/`<ol>` host with direct children that don't have `role="listitem"`.
+  - **role-listitem-orphan** — `[role="listitem"]` outside any `role="list"` or natural list ancestor.
+  - **dl-bad-children** — `<dl>` with direct children other than `<dt>`, `<dd>`, `<div>` (HTML5 group wrapper), `<script>`, `<template>`.
+  - **dl-dt-no-dd** — `<dt>` group has no `<dd>` before the next `<dt>` or end.
+  - **dl-dd-no-dt** — `<dd>` with no preceding `<dt>` in its group.
+  - Filter bar: All / Issues / `<ul>`/`<ol>` / `<dl>` / ARIA lists / Single-item (lists with exactly one item — not invalid, available as a filter for the misuse-as-styling smell).
 - **Buttons & interactive check.** WCAG 2.1.1 Keyboard, 4.1.2 Name/Role/Value, 3.3.1/3.3.2. Inventories every native `<button>`, every `<input type="button|submit|reset|image">`, every `<a>`, every element with an interactive ARIA role (`button`, `link`, `menuitem`, `tab`, `option`, `checkbox`, `radio`, `switch`, `treeitem`, …), and every non-interactive element carrying inline interaction handlers (`onclick`/`onmousedown`/`onmouseup`/`onpointerdown`/`onpointerup`) or button-toggle ARIA state attributes (`aria-pressed`/`aria-expanded`/`aria-haspopup`). Each row shows element + type chip, role, accessible name, href/handler source, tabindex, dimensions, disabled state, and unique selector.
   - **button-no-type-in-form** — `<button>` inside `<form>` without explicit `type=`. Defaults to `submit`, which causes accidental submission on Enter.
   - **button-type-reset** — `<button type="reset">` / `<input type="reset">`. Reset buttons routinely surprise users by clearing already-typed data without warning.
