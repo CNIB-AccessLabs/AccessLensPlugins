@@ -50,6 +50,22 @@ header strong { font-size: 16px; font-weight: 600; }
 
 section { padding: 12px 14px; }
 
+.run-all {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  background: #003876;
+  color: #fff;
+  border: 2px solid #003876;
+  border-radius: 5px;
+  cursor: pointer;
+  font: 700 16px/1.2 ui-sans-serif, system-ui, sans-serif;
+  text-align: center;
+  margin-bottom: 12px;
+}
+.run-all:hover { background: #00295c; border-color: #00295c; }
+.run-all:focus-visible { outline: 2px solid #ffd400; outline-offset: 2px; }
+
 .hint {
   margin: 0 0 8px 0;
   color: #555;

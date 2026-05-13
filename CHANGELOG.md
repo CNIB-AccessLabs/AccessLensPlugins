@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [1.1.0] — 2026-05-12
 
+### CSV export + "Run all" master panel
+
+- **Copy CSV** button added to every per-check panel alongside the existing Copy MD button. The CSV is auto-derived from the panel's pipe-separated MD table at click time — same data, different format.
+- **Run all 21 checks & export** button added at the top of the popup. Runs every check sequentially across all frames, then opens a master panel summarising every check's findings.
+- **Master panel:** collapsible per-check sections (auto-open for checks with issues, collapsed for clean ones), inline issue list per section, "Open this check on its own" button to drill into any one check.
+- **Combined Markdown export** — single `# CNIB AccessLens — All Checks` document with one `## Check Name` section per check, each containing a count summary plus an issues table.
+- **Combined CSV export** — flat 6-column spreadsheet: `Check, #, Issue type, Description, Selector, Frame`. Designed for triage; load it in Excel/Numbers/Sheets and sort/filter to plan remediation. Page-level issues (e.g. `ErrNoReducedMotionSupport`, `no-skip-link`) are included as rows with `(page-level)` in the Selector column.
+- **Download MD / Download CSV** — both formats save to the user's Downloads folder. Filenames: `accesslens-{hostname}-{YYYY-MM-DD-HHMM}.{md|csv}`.
+- **Sender-routed "Open this check"** — the master panel's per-section button posts `run_from_panel` to the background script. The background derives the tab from `sender.tab.id` rather than relying on the page to know its own tab ID.
+
 ### Rebrand — AccessibleName Inspector → CNIB AccessLens
 
 The project started as a single-purpose accessible-name inspector and has grown into a 21-check browser extension covering most of WCAG 2. The original name no longer describes what the tool does, so the project has been rebranded to **CNIB AccessLens** — matching the **CNIB AccessLabs** parent brand styling.

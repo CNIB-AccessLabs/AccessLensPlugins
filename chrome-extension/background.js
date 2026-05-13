@@ -49,6 +49,20 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     runCheck(msg.tabId, msg.checkId).catch(e => console.error("[a11yn] run failed:", e));
     return false;
   }
+  if (msg.type === "run_all") {
+    runAllChecks(msg.tabId).catch(e => console.error("[a11yn] run-all failed:", e));
+    return false;
+  }
+  if (msg.type === "run_from_panel") {
+    // Sent by the "Open this check on its own" button inside the master panel.
+    // The master panel runs in a content-script context so we read the tab from
+    // sender.tab — no explicit tabId is supplied by the caller.
+    const tabId = (sender && sender.tab) ? sender.tab.id : msg.tabId;
+    if (tabId != null) {
+      runCheck(tabId, msg.checkId).catch(e => console.error("[a11yn] run-from-panel failed:", e));
+    }
+    return false;
+  }
   if (msg.type === "close") {
     closeActive(msg.tabId).catch(e => console.error("[a11yn] close failed:", e));
     return false;
@@ -59,6 +73,43 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   return false;
 });
+
+async function runAllChecks(tabId) {
+  await closeActive(tabId);
+  const t0 = Date.now();
+  const allCheckData = [];
+  const checkIds = Object.keys(CHECKS);
+  for (let i = 0; i < checkIds.length; i++) {
+    const checkId = checkIds[i];
+    const check = CHECKS[checkId];
+    try {
+      const injection = await api.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: check.scan
+      });
+      const frames = injection.map(inj => {
+        const r = inj.result || {};
+        return Object.assign({}, r, {
+          frameId: inj.frameId,
+          url: r.url || "",
+          isTop: !!r.isTop,
+          results: r.results || [],
+          shadowRoots: r.shadowRoots || 0,
+          error: r.error
+        });
+      });
+      allCheckData.push({ checkId, label: check.label, frames });
+    } catch (e) {
+      allCheckData.push({ checkId, label: check.label, frames: [], error: (e && e.message) || String(e) });
+    }
+  }
+  const elapsedMs = Date.now() - t0;
+  await api.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    func: displayAllChecks,
+    args: [allCheckData, elapsedMs]
+  });
+}
 
 async function runCheck(tabId, checkId) {
   const check = CHECKS[checkId];
@@ -501,7 +552,7 @@ function displayNames(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Accessible Names (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -578,6 +629,45 @@ function displayNames(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -1039,7 +1129,7 @@ function displayHeadings(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Headings (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="visible">Visible only (' + visibleResults.length + ')</button>' +
@@ -1162,6 +1252,45 @@ function displayHeadings(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -1708,7 +1837,7 @@ function displayLandmarks(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Landmarks (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="landmarks">Landmarks (' + landmarkCount + ')</button>' +
@@ -1825,6 +1954,45 @@ function displayLandmarks(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -2332,7 +2500,7 @@ function displayImages(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Images (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -2436,6 +2604,45 @@ function displayImages(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -2990,7 +3197,7 @@ function displayLinks(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Links (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -3082,6 +3289,45 @@ function displayLinks(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -3914,7 +4160,7 @@ function displayAria(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>ARIA Usage (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="issues">Issues (' + issueRowCount + ')</button>' +
@@ -4039,6 +4285,45 @@ function displayAria(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -4778,7 +5063,7 @@ function displayContrast(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Contrast (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="fail">Fail (' + failCount + ')</button>' +
@@ -4887,6 +5172,45 @@ function displayContrast(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -5725,7 +6049,7 @@ function displayDocument(framesData, checkId) {
   panelEl.className = "panel filter-all";
   panelEl.innerHTML =
     "<header><strong>Title &amp; Language (" + findings.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + findings.length + ')</button>' +
       '<button data-filter="issues">Issues (' + totalIssues + ')</button>' +
@@ -6046,6 +6370,45 @@ function displayDocument(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -6697,7 +7060,7 @@ function displayTabindex(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Tabindex &amp; Focus Order (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="issues">Issues (' + totalIssues + ')</button>' +
@@ -6886,6 +7249,45 @@ function displayTabindex(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -8074,7 +8476,7 @@ function displayForms(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Forms (" + allControls.length + " ctrl / " + allForms.length + " form)</strong>" +
-    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allControls.length + ')</button>' +
       '<button data-filter="issues">Issues (' + issueCount + ')</button>' +
@@ -8270,6 +8672,45 @@ function displayForms(framesData, checkId) {
   })();
 
   panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  
+  // Build CSV from the just-built MD table. Each per-check MD already
+  // contains a pipe-separated table; convert to CSV by stripping pipes
+  // and quoting fields that contain commas/quotes/newlines.
+  function mdTableToCsv(mdSrc) {
+    var lines = mdSrc.split("\n"), out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line.charAt(0) !== "|") continue;
+      if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+      // Preserve escaped \| inside cells before splitting.
+      var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+        return c.replace(/\u0000/g, "|").trim();
+      });
+      // Trim leading/trailing empties from outer pipes.
+      if (cells.length && cells[0] === "") cells.shift();
+      if (cells.length && cells[cells.length - 1] === "") cells.pop();
+      out.push(cells.map(function (c) {
+        // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+        c = c.replace(/^`(.*)`$/, "$1");
+        if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+        return c;
+      }).join(","));
+    }
+    return out.join("\n");
+  }
+  var csv = mdTableToCsv(md);
+
+  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
   panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
     var btn = e.currentTarget;
     var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -8961,6 +9402,7 @@ function displayTables(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Tables (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -9148,6 +9590,45 @@ function displayTables(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -9702,6 +10183,7 @@ function displayIframes(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Iframes (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -9914,6 +10396,45 @@ function displayIframes(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -10468,6 +10989,7 @@ function displayButtons(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Buttons &amp; interactive (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -10676,6 +11198,45 @@ function displayButtons(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -11320,6 +11881,7 @@ function displayLists(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Lists (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -11499,6 +12061,45 @@ function displayLists(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -11928,6 +12529,7 @@ function displayTargetSize(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Target size (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -12098,6 +12700,45 @@ function displayTargetSize(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -12554,6 +13195,7 @@ function displaySkipLinks(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Skip links</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -12744,6 +13386,45 @@ function displaySkipLinks(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -13305,6 +13986,7 @@ function displayMedia(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Media (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -13497,6 +14179,45 @@ function displayMedia(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -13950,6 +14671,7 @@ function displayFocusVisible(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Focus visible (' + allResults.length + ' :focus rule' + (allResults.length === 1 ? "" : "s") + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -14114,6 +14836,45 @@ function displayFocusVisible(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -14536,6 +15297,7 @@ function displayReflow(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Reflow (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -14717,6 +15479,45 @@ function displayReflow(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -15399,6 +16200,7 @@ function displayNonTextContrast(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Non-text contrast (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -15594,6 +16396,45 @@ function displayNonTextContrast(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -16217,6 +17058,7 @@ function displayAnimation(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Animation (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'csv">Copy CSV</button>' +
             '<button id="' + P + 'copy">Copy MD</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
@@ -16421,6 +17263,45 @@ function displayAnimation(framesData, checkId) {
     })();
 
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    
+    // Build CSV from the just-built MD table. Each per-check MD already
+    // contains a pipe-separated table; convert to CSV by stripping pipes
+    // and quoting fields that contain commas/quotes/newlines.
+    function mdTableToCsv(mdSrc) {
+      var lines = mdSrc.split("\n"), out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.charAt(0) !== "|") continue;
+        if (/^\|\s*[-:]+/.test(line)) continue; // header-separator row
+        // Preserve escaped \| inside cells before splitting.
+        var cells = line.replace(/\\\|/g, "\u0000").split("|").map(function (c) {
+          return c.replace(/\u0000/g, "|").trim();
+        });
+        // Trim leading/trailing empties from outer pipes.
+        if (cells.length && cells[0] === "") cells.shift();
+        if (cells.length && cells[cells.length - 1] === "") cells.pop();
+        out.push(cells.map(function (c) {
+          // Strip surrounding backticks (selectors come wrapped) before CSV escape.
+          c = c.replace(/^`(.*)`$/, "$1");
+          if (/[",\n\r]/.test(c)) return "\"" + c.replace(/"/g, "\"\"") + "\"";
+          return c;
+        }).join(","));
+      }
+      return out.join("\n");
+    }
+    var csv = mdTableToCsv(md);
+
+    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+    
     panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
       var btn = e.currentTarget;
       var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
@@ -16454,6 +17335,375 @@ function displayAnimation(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Animation check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * RUN ALL — master display
+ *
+ * Renders a master panel summarising all 21 check results in one view,
+ * with combined Copy MD / Copy CSV / Download MD / Download CSV exports.
+ * Each check's section can be expanded to show its issues inline.
+ * "Open this check" re-runs an individual check (closes the master).
+ * ==================================================================== */
+
+function displayAllChecks(allCheckData, elapsedMs) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    // ---- aggregate issues across all checks ----
+    // Each issue row: { checkLabel, idx, type, text, sel, frameUrl }
+    var allIssues = [];
+    var totalFindings = 0;
+    var crossOriginFrames = 0;
+
+    for (var ci = 0; ci < allCheckData.length; ci++) {
+      var entry = allCheckData[ci];
+      entry._findings = 0;
+      entry._issueCount = 0;
+      entry._issues = [];
+      entry._pageIssues = [];
+      entry._error = entry.error || null;
+      if (!entry.frames || entry.frames.length === 0) continue;
+
+      for (var fi = 0; fi < entry.frames.length; fi++) {
+        var f = entry.frames[fi];
+        if (f.error) entry._error = f.error;
+        // Some scans expose top-level page issues (e.g. ErrNoReducedMotionSupport).
+        if (f.pageIssues && f.pageIssues.length) {
+          for (var pi = 0; pi < f.pageIssues.length; pi++) {
+            var p = f.pageIssues[pi];
+            entry._pageIssues.push({
+              type: p.type || "page-issue",
+              text: p.text || "",
+              frameUrl: f.isTop ? "" : (f.url || "")
+            });
+            allIssues.push({
+              checkLabel: entry.label,
+              idx: "",
+              type: p.type || "page-issue",
+              text: p.text || "",
+              sel: "(page-level)",
+              frameUrl: f.isTop ? "" : (f.url || "")
+            });
+            entry._issueCount++;
+          }
+        }
+        // Also fold in firstFocusable rows from Skip links etc.
+        var rows = f.results || [];
+        if ((!rows || rows.length === 0) && f.firstFocusable) rows = f.firstFocusable;
+        for (var ri = 0; ri < rows.length; ri++) {
+          var r = rows[ri];
+          entry._findings++;
+          totalFindings++;
+          if (r.issues && r.issues.length) {
+            for (var ii = 0; ii < r.issues.length; ii++) {
+              var iss = r.issues[ii];
+              entry._issues.push({
+                idx: r.idx,
+                type: iss.type || "",
+                text: iss.text || "",
+                sel: r.sel || "",
+                frameUrl: f.isTop ? "" : (f.url || "")
+              });
+              allIssues.push({
+                checkLabel: entry.label,
+                idx: r.idx,
+                type: iss.type || "",
+                text: iss.text || "",
+                sel: r.sel || "",
+                frameUrl: f.isTop ? "" : (f.url || "")
+              });
+              entry._issueCount++;
+            }
+          }
+        }
+        if (!f.isTop) crossOriginFrames++;
+      }
+    }
+
+    var totalIssues = allIssues.length;
+    var checksWithIssues = allCheckData.filter(function (c) { return c._issueCount > 0; }).length;
+    var checksWithFindings = allCheckData.filter(function (c) { return c._findings > 0 || c._issueCount > 0; }).length;
+
+    // ---- build combined Markdown ----
+    function mdEsc(s) { return String(s == null ? "" : s).replace(/\|/g, "\\|"); }
+    var dateStr = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    var md = "# CNIB AccessLens — All Checks\n\n";
+    md += "**Page:** " + location.href + "\n";
+    md += "**Date:** " + dateStr + "\n";
+    md += "**Summary:** " + allCheckData.length + " checks · " + totalFindings + " total findings · " +
+          totalIssues + " issues across " + checksWithIssues + " check(s) · " +
+          (elapsedMs / 1000).toFixed(1) + "s scan time.\n\n";
+
+    for (var ci2 = 0; ci2 < allCheckData.length; ci2++) {
+      var e = allCheckData[ci2];
+      md += "## " + e.label;
+      if (e._error) md += " — scan error";
+      md += "\n\n";
+      md += "_" + e._findings + " finding(s), " + e._issueCount + " issue(s)._\n";
+      if (e._error) md += "\n> Error: " + e._error + "\n";
+      if (e._pageIssues.length) {
+        md += "\n**Page-level:**\n\n";
+        for (var pmd = 0; pmd < e._pageIssues.length; pmd++) {
+          md += "- **" + e._pageIssues[pmd].type + "** — " + e._pageIssues[pmd].text + "\n";
+        }
+      }
+      if (e._issues.length) {
+        md += "\n**Issues:**\n\n";
+        md += "| # | Type | Description | Selector | Frame |\n";
+        md += "|---|------|-------------|----------|-------|\n";
+        for (var imd = 0; imd < e._issues.length; imd++) {
+          var i2 = e._issues[imd];
+          md += "| " + i2.idx + " | " + mdEsc(i2.type) + " | " + mdEsc(i2.text) +
+                " | `" + mdEsc(i2.sel) + "` | " + mdEsc(i2.frameUrl) + " |\n";
+        }
+      }
+      if (!e._issues.length && !e._pageIssues.length && !e._error) {
+        md += "\n_No issues._\n";
+      }
+      md += "\n";
+    }
+
+    // ---- build combined CSV ----
+    function csvCell(s) {
+      var v = String(s == null ? "" : s);
+      if (/[",\n\r]/.test(v)) return "\"" + v.replace(/"/g, "\"\"") + "\"";
+      return v;
+    }
+    var csvLines = ["Check,#,Issue type,Description,Selector,Frame"];
+    for (var ai = 0; ai < allIssues.length; ai++) {
+      var I = allIssues[ai];
+      csvLines.push([csvCell(I.checkLabel), csvCell(I.idx), csvCell(I.type),
+                     csvCell(I.text), csvCell(I.sel), csvCell(I.frameUrl)].join(","));
+    }
+    var csv = csvLines.join("\n");
+
+    // ---- panel ----
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 560px; max-height: 88vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }' +
+      'header strong { flex: 1 0 100%; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 13px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'details.check { border-bottom: 1px solid #eee; }' +
+      'details.check[open] { background: #f9fbff; }' +
+      'details.check.has-issue summary { background: #fdecec; color: #7a0000; }' +
+      'details.check summary { padding: 8px 12px; cursor: pointer; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }' +
+      'details.check summary .count { font-weight: 500; color: #555; margin-left: auto; font-size: 13px; }' +
+      'details.check.has-issue summary .count { color: #7a0000; }' +
+      'details.check .body { padding: 4px 12px 12px; }' +
+      'details.check .body button.open { font: inherit; font-size: 13px; border: 1px solid #003876; color: #003876; background: #fff; padding: 3px 8px; border-radius: 4px; cursor: pointer; margin-top: 6px; }' +
+      'details.check .body button.open:hover { background: #eef4ff; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 4px; }' +
+      '.issue strong { font-family: ui-monospace, monospace !important; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; margin-top: 2px; }' +
+      '.panel.filter-issues details.check:not(.has-issue) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header>' +
+            '<strong>CNIB AccessLens — All Checks</strong>' +
+            '<button id="' + P + 'copy_md">Copy MD</button>' +
+            '<button id="' + P + 'copy_csv">Copy CSV</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
+            '<button id="' + P + 'close">Close</button>' +
+            '</header>';
+
+    html += '<div class="summary">' +
+            allCheckData.length + ' checks · ' +
+            totalFindings + ' findings · ' +
+            '<strong>' + totalIssues + ' issues</strong> in ' +
+            checksWithIssues + ' check(s) · ' +
+            (elapsedMs / 1000).toFixed(1) + 's' +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allCheckData.length + ')</button>' +
+            '<button data-filter="issues">With issues (' + checksWithIssues + ')</button>' +
+            '</div>';
+
+    for (var di = 0; di < allCheckData.length; di++) {
+      var d = allCheckData[di];
+      var classes = ["check"];
+      if (d._issueCount > 0) classes.push("has-issue");
+      html += '<details class="' + classes.join(" ") + '"' + (d._issueCount > 0 ? " open" : "") + '>';
+      html += '<summary>' + esc(d.label) +
+              '<span class="count">' + d._findings + ' finding' + (d._findings === 1 ? "" : "s") +
+              (d._issueCount ? ' · ' + d._issueCount + ' issue' + (d._issueCount === 1 ? "" : "s") : "") +
+              '</span></summary>';
+      html += '<div class="body">';
+      if (d._error) {
+        html += '<div class="issue"><strong>scan-error</strong>: ' + esc(d._error) + '</div>';
+      }
+      for (var pi2 = 0; pi2 < d._pageIssues.length; pi2++) {
+        var pp = d._pageIssues[pi2];
+        html += '<div class="issue"><strong>' + esc(pp.type) + '</strong> (page-level): ' + esc(pp.text) + '</div>';
+      }
+      for (var ii2 = 0; ii2 < d._issues.length; ii2++) {
+        var iv = d._issues[ii2];
+        html += '<div class="issue"><strong>' + esc(iv.type) + '</strong> #' + esc(iv.idx) + ': ' + esc(iv.text);
+        if (iv.frameUrl) html += ' <em>(in frame ' + esc(iv.frameUrl) + ')</em>';
+        html += '<div class="sel">' + esc(iv.sel) + '</div></div>';
+      }
+      if (!d._error && !d._pageIssues.length && !d._issues.length) {
+        html += '<div style="color:#1a5a1a; font-size:14px;">✓ No issues.</div>';
+      }
+      html += '<button class="open" data-checkid="' + esc(d.checkId) + '">Open this check on its own</button>';
+      html += '</div>';
+      html += '</details>';
+    }
+    html += '<footer>Combined MD has per-check issue tables · Combined CSV is a flat issue list (Check, #, Type, Description, Selector, Frame).</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    // ---- wire buttons ----
+    function flash(btn, label, baseLabel) {
+      btn.textContent = label;
+      setTimeout(function () { btn.textContent = baseLabel; }, 1400);
+    }
+    function copyText(text, btn, baseLabel) {
+      var done = function (ok) { flash(btn, ok ? "Copied!" : "Copy failed", baseLabel); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    }
+    function downloadBlob(text, filename, mime, btn, baseLabel) {
+      try {
+        var blob = new Blob([text], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url; a.download = filename; a.style.display = "none";
+        document.body.appendChild(a); a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        flash(btn, "Downloaded!", baseLabel);
+      } catch (e) {
+        flash(btn, "Download failed", baseLabel);
+      }
+    }
+    function timestamp() {
+      var d = new Date();
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+             pad(d.getHours()) + pad(d.getMinutes());
+    }
+    function filename(ext) {
+      var host = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      return "accesslens-" + host + "-" + timestamp() + "." + ext;
+    }
+
+    panelEl.querySelector("#" + P + "copy_md").addEventListener("click", function (e) { copyText(md, e.currentTarget, "Copy MD"); });
+    panelEl.querySelector("#" + P + "copy_csv").addEventListener("click", function (e) { copyText(csv, e.currentTarget, "Copy CSV"); });
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) { downloadBlob(md, filename("md"), "text/markdown", e.currentTarget, "Download MD"); });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) { downloadBlob(csv, filename("csv"), "text/csv", e.currentTarget, "Download CSV"); });
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    panelEl.querySelectorAll("button.open").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var checkId = btn.dataset.checkid;
+        window[P + "cleanup"]();
+        try {
+          // Use chrome.runtime / browser.runtime to ask the extension to run this check.
+          var api = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (api && api.runtime && api.runtime.sendMessage) {
+            api.runtime.sendMessage({ type: "run_from_panel", checkId: checkId });
+          }
+        } catch (e) {}
+      });
+    });
+
+    // ---- drag ----
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    window[P + "active"] = "__all__";
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Run all failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}

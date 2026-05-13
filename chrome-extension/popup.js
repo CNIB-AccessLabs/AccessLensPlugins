@@ -74,6 +74,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       window.close();
     });
   });
+  const runAllBtn = document.getElementById("run-all-btn");
+  if (runAllBtn) {
+    runAllBtn.addEventListener("click", async () => {
+      const tab = await getActiveTab();
+      if (!tab || !tab.id) return;
+      await api.runtime.sendMessage({ type: "run_all", tabId: tab.id });
+      window.close();
+    });
+  }
 });
 
 function escapeHtml(s) {
