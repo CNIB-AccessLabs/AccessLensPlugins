@@ -103,6 +103,12 @@
       </button>
       <p class="desc">WCAG 2.5.8 Target Size (Minimum, AA · 24×24 CSS px) and 2.5.5 Target Size (Enhanced, AAA · 44×44 CSS px). Measures every interactive element's bounding rect. Classifies each as pass, fail-AA, fail-AA-spacing-ok (undersized but the 24-px spacing exception applies), fail-AAA-only (passes AA but not AAA), or inline-link (in-flow-text exception). Hidden / disabled / zero-size elements are excluded per spec. Caveats listed in the panel: measured at current rendered size; rotation/transforms use bounding rect; "equivalent control" and "user-agent" exceptions can't be detected.</p>
     </li>
+    <li>
+      <button class="check" data-check="skiplinks">
+        <span class="label">Skip links</span>
+      </button>
+      <p class="desc">WCAG 2.4.1 Bypass Blocks. Walks the first 10 focusable elements in DOM order and identifies skip-link candidates: same-page anchors (&lt;a href="#id"&gt;) whose text matches /skip|jump|to main|to content/i OR whose target resolves to &lt;main&gt;, &lt;h1&gt;, [role="main"], or a landmark. For each candidate, validates the target exists, is a main-content anchor, and is focusable (non-interactive targets need tabindex="-1" or focus won't land). Page-level flags: no-skip-link, skip-link-not-first. Limitation: can't actually focus the link to test "visually-hidden-until-focus" CSS — only the current rendered state is observed.</p>
+    </li>
   </ul>
 </section>
 <footer>

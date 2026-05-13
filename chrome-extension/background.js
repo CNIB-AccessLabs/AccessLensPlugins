@@ -34,7 +34,8 @@ const CHECKS = {
   iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   },
   buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons },
   lists:     { label: "Lists",            scan: scanLists,     display: displayLists     },
-  targetsize:{ label: "Target size",      scan: scanTargetSize, display: displayTargetSize }
+  targetsize:{ label: "Target size",      scan: scanTargetSize, display: displayTargetSize },
+  skiplinks: { label: "Skip links",       scan: scanSkipLinks, display: displaySkipLinks  }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -12125,6 +12126,652 @@ function displayTargetSize(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Target Size check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: SKIP LINKS — WCAG 2.4.1 Bypass Blocks
+ *
+ * Walks the first ~10 focusable elements in DOM order, identifies
+ * skip-link candidates, and validates each candidate's target.
+ *
+ * A candidate is any same-page <a href="#id"> whose text matches
+ * /skip|jump|to main|to content|main content/i OR whose target
+ * resolves to a main-content anchor (main, h1, [role="main"], a
+ * landmark).
+ *
+ * Status per candidate:
+ *   ok                    target exists and is a main-content anchor
+ *   target-missing        #id doesn't resolve in this document
+ *   target-not-landmark   target exists but isn't main/h1/landmark
+ *   target-not-focusable  target is non-interactive and lacks
+ *                         tabindex="-1" — focus won't move there
+ *
+ * Page-level issues (rendered as a banner above the list):
+ *   no-skip-link          no candidate in the first 10 focusable
+ *   skip-link-not-first   a candidate exists but other focusable
+ *                         elements precede it
+ * ==================================================================== */
+
+function scanSkipLinks() {
+  "use strict";
+  try {
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var shadowRoots = 0;
+    var idCounter = 0;
+    var FIRST_LIMIT = 10;
+    var LANDMARK_TAGS = { MAIN: 1, HEADER: 1, FOOTER: 1, NAV: 1, ASIDE: 1, SECTION: 1, FORM: 1 };
+    var LANDMARK_ROLES = { banner: 1, navigation: 1, main: 1, complementary: 1, contentinfo: 1, region: 1, search: 1, form: 1 };
+    var SKIP_TEXT = /skip|jump|to\s+main|to\s+content|main\s+content|to\s+nav|to\s+search|bypass/i;
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function computeAccName(el) {
+      if (!el) return "";
+      var alb = el.getAttribute && el.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return joined;
+      }
+      var al = el.getAttribute && el.getAttribute("aria-label");
+      if (al && al.trim()) return al.trim();
+      var t = txt(el);
+      if (t) return t;
+      var ti = el.getAttribute && el.getAttribute("title");
+      if (ti && ti.trim()) return ti.trim();
+      return "";
+    }
+
+    function isFocusable(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.hasAttribute && el.hasAttribute("disabled")) return false;
+      if (isHidden(el)) return false;
+      var ti = el.getAttribute && el.getAttribute("tabindex");
+      if (ti != null) {
+        var n = parseInt(ti, 10);
+        if (isFinite(n) && n >= 0) return true;
+        if (isFinite(n) && n < 0) return false;
+      }
+      var tag = el.tagName;
+      if (tag === "A" && el.hasAttribute("href")) return true;
+      if (tag === "AREA" && el.hasAttribute("href")) return true;
+      if (tag === "BUTTON") return true;
+      if (tag === "INPUT") {
+        var t = (el.getAttribute("type") || "text").toLowerCase();
+        return t !== "hidden";
+      }
+      if (tag === "SELECT" || tag === "TEXTAREA" || tag === "SUMMARY") return true;
+      if (tag === "IFRAME") return true;
+      if ((tag === "AUDIO" || tag === "VIDEO") && el.hasAttribute("controls")) return true;
+      if (el.hasAttribute && el.hasAttribute("contenteditable") && el.getAttribute("contenteditable") !== "false") return true;
+      return false;
+    }
+
+    function firstFocusables(limit) {
+      var found = [];
+      function walk(root) {
+        if (!root || found.length >= limit) return;
+        var children;
+        try { children = root.children; } catch (e) { return; }
+        if (!children) return;
+        for (var i = 0; i < children.length && found.length < limit; i++) {
+          var c = children[i];
+          if (c.nodeType !== 1) continue;
+          if (isFocusable(c)) found.push(c);
+          if (c.shadowRoot) {
+            shadowRoots++;
+            walk(c.shadowRoot);
+          }
+          walk(c);
+        }
+      }
+      walk(document.body || document.documentElement);
+      return found;
+    }
+
+    function isLandmark(el) {
+      if (!el) return { is: false, why: "" };
+      var tag = el.tagName;
+      var role = ((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+      if (tag === "MAIN") return { is: true, why: "<main>" };
+      if (tag === "H1") return { is: true, why: "<h1>" };
+      if (role === "main") return { is: true, why: "role=\"main\"" };
+      if (role === "heading" && (el.getAttribute("aria-level") || "1") === "1") return { is: true, why: "role=\"heading\" level 1" };
+      if (LANDMARK_ROLES[role]) return { is: true, why: "role=\"" + role + "\"" };
+      if (LANDMARK_TAGS[tag]) {
+        // section/form/header/footer/aside/nav as landmark — require name for section/form.
+        if (tag === "SECTION" || tag === "FORM") {
+          var hasName = (el.getAttribute && (el.getAttribute("aria-label") || el.getAttribute("aria-labelledby")));
+          return { is: !!hasName, why: hasName ? "<" + tag.toLowerCase() + "> with name" : "<" + tag.toLowerCase() + "> without name (not a landmark)" };
+        }
+        return { is: true, why: "<" + tag.toLowerCase() + ">" };
+      }
+      return { is: false, why: "" };
+    }
+
+    function targetWillFocus(el) {
+      // After click on a skip link, focus moves to the target only if
+      // the target is focusable. Non-interactive elements need
+      // tabindex (any value, including -1) for focus to land.
+      if (!el) return false;
+      if (isFocusable(el)) return true;
+      var ti = el.getAttribute && el.getAttribute("tabindex");
+      if (ti != null) return true; // tabindex=-1 makes it programmatically focusable
+      return false;
+    }
+
+    function isSameDocAnchor(href) {
+      if (!href) return null;
+      // Match "#id", "#" alone is not useful
+      if (href.charAt(0) === "#" && href.length > 1) return href.slice(1);
+      // "page.html#id" — only count current-page same-anchor if path matches
+      try {
+        var u = new URL(href, location.href);
+        if (u.pathname === location.pathname && u.host === location.host && u.hash && u.hash.length > 1) {
+          return u.hash.slice(1);
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    function analyseFocusable(el, pos) {
+      var name = computeAccName(el);
+      var entry = {
+        idx: ++idCounter,
+        position: pos,
+        sel: uniqueSelector(el),
+        tag: el.tagName.toLowerCase(),
+        role: (el.getAttribute("role") || "").toLowerCase(),
+        accName: name,
+        href: el.tagName === "A" ? el.getAttribute("href") : null,
+        isSameDocAnchor: false,
+        targetId: null,
+        targetTag: "",
+        targetRole: "",
+        targetText: "",
+        targetIsLandmark: false,
+        targetReason: "",
+        isSkipLinkCandidate: false,
+        status: "not-skip-link",
+        skipReason: "",
+        issues: [],
+        _resolveSel: uniqueSelector(el)
+      };
+
+      if (el.tagName === "A") {
+        var id = isSameDocAnchor(el.getAttribute("href"));
+        if (id) {
+          entry.isSameDocAnchor = true;
+          entry.targetId = id;
+          var target;
+          try { target = document.getElementById(id); } catch (e) { target = null; }
+          if (target) {
+            entry.targetTag = target.tagName.toLowerCase();
+            entry.targetRole = (target.getAttribute("role") || "").toLowerCase();
+            entry.targetText = txt(target).slice(0, 60);
+            var lm = isLandmark(target);
+            entry.targetIsLandmark = lm.is;
+            entry.targetReason = lm.why;
+          }
+          // Candidate detection: text match OR target-is-landmark.
+          var textMatch = SKIP_TEXT.test(name) || SKIP_TEXT.test(el.getAttribute("aria-label") || "");
+          if (textMatch || entry.targetIsLandmark) {
+            entry.isSkipLinkCandidate = true;
+            if (!target) {
+              entry.status = "target-missing";
+              entry.issues.push({
+                type: "target-missing",
+                text: 'href="#' + id + '" does not resolve to any element on this page.'
+              });
+            } else if (!entry.targetIsLandmark) {
+              entry.status = "target-not-landmark";
+              entry.issues.push({
+                type: "target-not-landmark",
+                text: "Target <" + entry.targetTag + (entry.targetRole ? ' role="' + entry.targetRole + '"' : '') + "> is not a main-content anchor. Use <main>, <h1>, [role=\"main\"], or a landmark."
+              });
+            } else if (!targetWillFocus(target)) {
+              entry.status = "target-not-focusable";
+              entry.issues.push({
+                type: "target-not-focusable",
+                text: "Target <" + entry.targetTag + "> is not focusable. After activating the skip link, keyboard focus won't move to it (and may go back to the top). Add tabindex=\"-1\" to the target."
+              });
+            } else {
+              entry.status = "ok";
+            }
+          }
+        }
+      }
+      return entry;
+    }
+
+    var firstFoc = firstFocusables(FIRST_LIMIT);
+    var firstFocResults = [];
+    for (var i = 0; i < firstFoc.length; i++) {
+      firstFocResults.push(analyseFocusable(firstFoc[i], i + 1));
+    }
+
+    // Determine page-level state.
+    var skipCandidates = firstFocResults.filter(function (r) { return r.isSkipLinkCandidate; });
+    var firstIsSkip = firstFocResults.length > 0 && firstFocResults[0].isSkipLinkCandidate;
+    var hasSkipLink = skipCandidates.length > 0;
+
+    var pageIssues = [];
+    if (!hasSkipLink) {
+      pageIssues.push({
+        type: "no-skip-link",
+        text: "No skip-link candidate detected in the first " + FIRST_LIMIT + " focusable elements. Keyboard users cannot bypass navigation."
+      });
+    } else if (!firstIsSkip) {
+      // Find first candidate's position
+      var firstSkip = skipCandidates[0];
+      pageIssues.push({
+        type: "skip-link-not-first",
+        text: "First skip-link candidate is at focus position " + firstSkip.position + " (after " + (firstSkip.position - 1) + " other focusable element(s)). Skip links should be the first focusable element on the page."
+      });
+    }
+
+    return {
+      url: url,
+      isTop: isTop,
+      firstFocusable: firstFocResults,
+      pageIssues: pageIssues,
+      hasSkipLink: hasSkipLink,
+      firstIsSkipLink: firstIsSkip,
+      candidateCount: skipCandidates.length,
+      firstLimit: FIRST_LIMIT,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      firstFocusable: [],
+      pageIssues: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displaySkipLinks(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    // Aggregate per-frame results.
+    var perFrame = [];
+    var totalShadow = 0;
+    var anyError = null;
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      totalShadow += (fd.shadowRoots || 0);
+      perFrame.push(fd);
+    }
+
+    // Top frame is the one to render; we surface other frames as
+    // supplementary context (each iframe's content is its own document
+    // and skip-link conventions may differ).
+    var topFrames = perFrame.filter(function (f) { return f.isTop; });
+    var allRows = [];
+    var pageIssues = [];
+
+    perFrame.forEach(function (f) {
+      if (f.isTop && f.pageIssues) {
+        f.pageIssues.forEach(function (p) { pageIssues.push(p); });
+      }
+      if (f.firstFocusable) {
+        f.firstFocusable.forEach(function (r) {
+          r._frameUrl = f.url;
+          r._frameIsTop = !!f.isTop;
+          allRows.push(r);
+        });
+      }
+    });
+
+    // Resolve elements (top frame only).
+    for (var ai = 0; ai < allRows.length; ai++) {
+      var d = allRows[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    // Counts.
+    var totalFocusable = allRows.length;
+    var skipCandidates = allRows.filter(function (r) { return r.isSkipLinkCandidate; }).length;
+    var withIssues = allRows.filter(function (r) { return r.issues && r.issues.length; }).length;
+    var targetsNotLandmark = allRows.filter(function (r) { return r.status === "target-not-landmark"; }).length;
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 500px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.pageissue { background: #fdecec; color: #7a0000; padding: 8px 12px; margin: 0; border-bottom: 1px solid #f3c7c7; font-size: 14px; font-weight: 500; }' +
+      '.pageok { background: #e6f4e6; color: #1a5a1a; padding: 8px 12px; margin: 0; border-bottom: 1px solid #c7e4c7; font-size: 14px; font-weight: 500; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.pos { background: #555; color: #fff; }' +
+      '.chip.ok { background: #1a7f1a; color: #fff; }' +
+      '.chip.warn { background: #d97706; color: #fff; }' +
+      '.chip.fail { background: #b00020; color: #fff; }' +
+      '.chip.normal { background: #707070; color: #fff; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.name.missing { color: #b00020; font-style: italic; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.target { font-size: 13px; color: #303030; margin-top: 4px; padding-left: 12px; border-left: 3px solid #cfd6e0; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-skip li.row:not(.is-skip) { display: none; }' +
+      '.panel.filter-first li.row:not(.is-first) { display: none; }' +
+      '.panel.filter-nolm li.row:not(.is-nolm) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Skip links</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      totalFocusable + " focusable inspected (first " + (perFrame[0] ? perFrame[0].firstLimit || 10 : 10) + ")",
+      skipCandidates + " skip-link candidate" + (skipCandidates === 1 ? "" : "s"),
+      withIssues + " with issues"
+    ];
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    // Page-level banner.
+    if (pageIssues.length === 0 && skipCandidates > 0) {
+      html += '<div class="pageok">Page has a skip-link candidate as the first focusable element.</div>';
+    }
+    for (var pi = 0; pi < pageIssues.length; pi++) {
+      html += '<div class="pageissue">' + esc(pageIssues[pi].text) + '</div>';
+    }
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + totalFocusable + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="skip">Skip-link candidates (' + skipCandidates + ')</button>' +
+            '<button data-filter="first">First-focusable (' + totalFocusable + ')</button>' +
+            '<button data-filter="nolm">Target not landmark (' + targetsNotLandmark + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allRows.length; ix++) {
+      var t = allRows[ix];
+      var classes = ["row", "is-first"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.isSkipLinkCandidate) classes.push("is-skip");
+      if (t.status === "target-not-landmark") classes.push("is-nolm");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+      html += '<span class="chip pos">pos ' + t.position + '</span>';
+
+      var chipClass = "normal", chipLabel = "FOCUSABLE";
+      if (t.isSkipLinkCandidate) {
+        if (t.status === "ok") { chipClass = "ok"; chipLabel = "SKIP LINK (ok)"; }
+        else if (t.status === "target-missing") { chipClass = "fail"; chipLabel = "TARGET MISSING"; }
+        else if (t.status === "target-not-landmark") { chipClass = "warn"; chipLabel = "TARGET NOT LANDMARK"; }
+        else if (t.status === "target-not-focusable") { chipClass = "warn"; chipLabel = "TARGET NOT FOCUSABLE"; }
+        else { chipClass = "warn"; chipLabel = "SKIP LINK"; }
+      }
+      html += '<span class="chip ' + chipClass + '">' + chipLabel + '</span>';
+
+      var elDesc = "<" + t.tag + (t.role ? ' role="' + esc(t.role) + '"' : '') + (t.href ? ' href="' + esc(t.href) + '"' : '') + ">";
+      html += '<span style="font-family: ui-monospace, monospace; font-size: 13px; color:#555;">' + esc(elDesc) + '</span>';
+
+      if (t.accName) {
+        html += '<div class="name">' + esc(t.accName.length > 70 ? t.accName.slice(0, 70) + "…" : t.accName) + '</div>';
+      } else {
+        html += '<div class="name missing">(no accessible name)</div>';
+      }
+
+      if (t.isSameDocAnchor && t.isSkipLinkCandidate) {
+        if (t.targetTag) {
+          var tgtBits = ["<" + t.targetTag + ">"];
+          if (t.targetRole) tgtBits.push("role=" + t.targetRole);
+          if (t.targetReason) tgtBits.push(t.targetReason);
+          html += '<div class="target">→ target #' + esc(t.targetId) + ': ' + esc(tgtBits.join(" · "));
+          if (t.targetText) html += ' — "' + esc(t.targetText) + '"';
+          html += '</div>';
+        } else {
+          html += '<div class="target">→ target #' + esc(t.targetId) + ': <em>not found</em></div>';
+        }
+      }
+
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 2.4.1 Bypass Blocks. Limitation: we can\'t actually focus the link to test if "visually-hidden-until-focus" styling makes it visible — only the link\'s current rendered state is observed. The first 10 focusable elements (DOM order) are inspected; positive tabindex values (anti-pattern) are not specially handled.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allRows[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    for (var oi = 0; oi < allRows.length; oi++) {
+      var o = allRows[oi];
+      if (o._resolveEl) {
+        try {
+          var color = "#003876";
+          if (o.issues && o.issues.length) color = "#b00020";
+          else if (o.status === "ok" && o.isSkipLinkCandidate) color = "#1a7f1a";
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Skip links\n\n";
+    md += "First focusable count: " + totalFocusable + ", skip-link candidates: " + skipCandidates + ", issues: " + withIssues + ".\n\n";
+    if (pageIssues.length) {
+      md += "**Page issues:**\n";
+      for (var pm = 0; pm < pageIssues.length; pm++) {
+        md += "- " + pageIssues[pm].text + "\n";
+      }
+      md += "\n";
+    }
+    md += "| # | Pos | Status | Element | Name | Target | Selector |\n";
+    md += "|---|-----|--------|---------|------|--------|----------|\n";
+    for (var mi = 0; mi < allRows.length; mi++) {
+      var mt = allRows[mi];
+      var tagD = "<" + mt.tag + (mt.role ? " role=" + mt.role : "") + (mt.href ? " href=" + mt.href : "") + ">";
+      var name = mt.accName ? mt.accName.replace(/\|/g, "\\|") : "";
+      var tgt = mt.isSameDocAnchor ? ("#" + mt.targetId + " → " + (mt.targetTag || "missing")) : "";
+      var statusStr = mt.isSkipLinkCandidate ? mt.status : "(not skip link)";
+      md += "| " + mt.idx +
+            " | " + mt.position +
+            " | " + statusStr +
+            " | " + tagD.replace(/\|/g, "\\|") +
+            " | " + name +
+            " | " + tgt.replace(/\|/g, "\\|") +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "` |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allRows.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Skip Links check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}
