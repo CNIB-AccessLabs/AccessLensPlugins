@@ -2,7 +2,7 @@
 
 ## Our commitment
 
-AccessibleName is built on the belief that everyone deserves access to digital systems. That ethic applies to our community as much as to our software. We commit to making participation in this project a welcoming experience regardless of age, disability, ethnicity, gender identity, level of experience, nationality, race, religion, or sexual orientation.
+AccessLens is built on the belief that everyone deserves access to digital systems. That ethic applies to our community as much as to our software. We commit to making participation in this project a welcoming experience regardless of age, disability, ethnicity, gender identity, level of experience, nationality, race, religion, or sexual orientation.
 
 ## Expected behaviour
 

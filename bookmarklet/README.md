@@ -1,10 +1,10 @@
-# AccessibleName — Bookmarklet
+# AccessLens — Bookmarklet
 
 Drag-to-install bookmarklet for quick accessibility-name inspection on any page. No build step, no dependencies, no network calls. Same scanner core as the [Firefox](../firefox-extension) and [Chrome](../chrome-extension) extensions, but bound by browser same-origin policy — see "Limitations" below.
 
 ## Install
 
-Open [`a11y-names.html`](./a11y-names.html) in your browser and drag the **a11y: names** button to your bookmarks bar. The page reads its embedded `<script id="bookmarklet-source">` block and URL-encodes it into the bookmark's `href` on page load, so the install page and the bookmarklet are always in sync.
+Open [`accesslens.html`](./accesslens.html) in your browser and drag the **a11y: names** button to your bookmarks bar. The page reads its embedded `<script id="bookmarklet-source">` block and URL-encodes it into the bookmark's `href` on page load, so the install page and the bookmarklet are always in sync.
 
 ## Use
 
@@ -25,7 +25,7 @@ A few sites with very strict Content Security Policy (`script-src 'self'` with n
 
 ## How it works
 
-[`a11y-names.html`](./a11y-names.html) contains the readable source inside a `<script id="bookmarklet-source" type="text/template">` block. A small script at the bottom of the HTML:
+[`accesslens.html`](./accesslens.html) contains the readable source inside a `<script id="bookmarklet-source" type="text/template">` block. A small script at the bottom of the HTML:
 
 1. Reads that template's text content.
 2. URL-encodes it with `encodeURIComponent`.
@@ -33,7 +33,7 @@ A few sites with very strict Content Security Policy (`script-src 'self'` with n
 
 This pattern means there's no separate minify-and-encode step in the build pipeline — there is no build pipeline. Edit the source in the HTML, reload, drag the new bookmark.
 
-[`src/a11y-names.js`](./src/a11y-names.js) is the same source extracted as a standalone file for syntax highlighting in Git diffs and editor support. It is functionally identical to the embedded copy in the HTML.
+[`src/accesslens.js`](./src/accesslens.js) is the same source extracted as a standalone file for syntax highlighting in Git diffs and editor support. It is functionally identical to the embedded copy in the HTML.
 
 ## Architecture
 

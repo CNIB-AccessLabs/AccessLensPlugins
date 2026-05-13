@@ -1,4 +1,4 @@
-/* AccessibleName Inspector — popup styles
+/* CNIB AccessLens — popup styles
  * Hard-coded font-family using only CSS generic keywords so @font-face on
  * the host browser UI can't reach us. Body width matches Chrome/Firefox popup
  * default constraints. */
@@ -21,7 +21,11 @@ header {
   padding: 10px 14px;
   background: #003876;
   color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
+header img.brand { width: 32px; height: 32px; flex: 0 0 auto; display: block; }
 header strong { font-size: 16px; font-weight: 600; }
 
 #status {

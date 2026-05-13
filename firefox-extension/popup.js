@@ -1,4 +1,4 @@
-/* AccessibleName Inspector — popup script.
+/* CNIB AccessLens — popup script.
  *
  * Shows what's currently inspecting on the page (if anything), and lets the
  * user pick a check to run. The toolbar click is the only entry point;

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [1.1.0] — 2026-05-12
 
+### Rebrand — AccessibleName Inspector → CNIB AccessLens
+
+The project started as a single-purpose accessible-name inspector and has grown into a 21-check browser extension covering most of WCAG 2. The original name no longer describes what the tool does, so the project has been rebranded to **CNIB AccessLens** — matching the **CNIB AccessLabs** parent brand styling.
+
+- **New public repository:** `CNIB-AccessLabs/AccessLensPlugins` (replaces `CNIB-AccessLabs/AccessibleName`). This repo is the public, browser-side complement to the main **CNIB AccessLens** accessibility-testing platform (a separate private repository).
+- **New Firefox extension ID:** `accesslens@cnib.ca` (replaces `a11y-names@cnib.ca`). This is a clean break — anyone running the previous extension will need to uninstall and re-install. The upgrade path is not preserved.
+- **New bookmarklet filename:** `bookmarklet/accesslens.html` (replaces `a11y-names.html`).
+- **New toolbar icon:** the yellow phone-circle from the CNIB AccessLabs lockup.
+- **Popup header:** now shows the phone-circle icon next to the "CNIB AccessLens" wordmark.
+- **Footer attribution:** "A CNIB Access Labs project · CNIB-AccessLabs/AccessLensPlugins".
+- **Manifest description:** updated to "Multi-check accessibility inspector from CNIB Access Labs: accessible names, headings, contrast, focus order, forms, ARIA, and more. Reports across iframes (including cross-origin) and shadow DOM. No network calls."
+- **Internal JavaScript identifiers preserved:** the `__a11yn_ext_` global prefix, the `[a11yn]` and `[a11y-names]` console-log prefixes, and the bookmarklet's `_a11y_names_cleanup_` global all remain unchanged. They are invisible to users; renaming them carried risk of subtle breakage with no user-facing benefit.
+
+
+
 ### Added
 
 - **Headings and Landmarks now show complete inventories** (like the user's existing bookmarklets). Headings includes hidden ones (`display:none`, `visibility:hidden`, `aria-hidden="true"`, `opacity:0`) with a "HIDDEN · reason" tag, and visually-hidden sr-only headings with an "sr-only" tag — hidden headings don't get page badges and don't trigger multi-h1 / skipped-level issues (those affect visible navigation), but they're in the list so auditors can spot stale or AT-only headings. Landmarks now lists non-qualifying candidates (e.g. `<header>` inside `<article>`, `<section>` without a name) in the main panel with a "not landmark" chip and the reason — previously these were hidden in a collapsible section. Both panels gain a filter bar (All / Visible / Hidden / Issues for headings; All / Landmarks / Non-landmarks / Issues for landmarks).
@@ -227,7 +242,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Cross-link clusters surface in the `related` field on each issue so the panel and Markdown both show every member of the cluster, not just the current row.
 - **Popup-driven multi-check architecture.** The toolbar icon opens a popup listing every available check. The popup shows whether an inspection is currently displayed on the page and offers a Close button. No keyboard shortcuts are bound by default — Chrome enforces a four-shortcut limit on extension commands and we have more than that, so all activation goes through the toolbar popup.
 - **Draggable inspector panel.** Grab the panel's title bar to move it anywhere on screen — useful when the default top-right position covers the element you're inspecting. Uses pointer capture so the drag survives crossing iframes and other elements that would otherwise swallow mouse events. Buttons inside the title bar (Close, Copy MD) still receive clicks normally. The bookmarklet panel is also draggable.
-- Extension renamed to **AccessibleName Inspector** to reflect its expansion beyond names. Existing Firefox extension ID (`a11y-names@cnib.ca`) is preserved so updates land in place.
+- Extension renamed to **CNIB AccessLens** to reflect its expansion beyond names. Existing Firefox extension ID (`accesslens@cnib.ca`) is preserved so updates land in place.
 
 ### Changed
 
@@ -292,7 +307,7 @@ Initial release.
 
 ### Added
 
-- Bookmarklet (`bookmarklet/a11y-names.html`) — drag-to-install, fully self-contained, no network calls. Walks the top document and same-origin iframes plus open shadow roots.
+- Bookmarklet (`bookmarklet/accesslens.html`) — drag-to-install, fully self-contained, no network calls. Walks the top document and same-origin iframes plus open shadow roots.
 - Firefox WebExtension (`firefox-extension/`) — MV3, uses `scripting.executeScript` with `allFrames: true` to run the scanner in every frame regardless of origin. Aggregates results in a single panel rendered in the top frame.
 - Chrome / Edge / Brave WebExtension (`chrome-extension/`) — MV3 service worker variant. Byte-identical `background.js` to the Firefox version.
 - Implements the common path of the W3C Accessible Name and Description Computation 1.2.

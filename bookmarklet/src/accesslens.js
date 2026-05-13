@@ -1,57 +1,15 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>a11y: Accessible Names Bookmarklet</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; max-width: 820px; margin: 32px auto; padding: 0 20px; color: #1a1a1a; background: #fafafa; }
-  h1 { color: #003876; margin-bottom: 4px; }
-  h2 { color: #003876; margin-top: 28px; border-bottom: 1px solid #e0e0e0; padding-bottom: 4px; }
-  .sub { color: #555; margin-top: 0; }
-  pre { background: #f1f3f5; padding: 14px; overflow: auto; border-radius: 6px; font-size: 13px; line-height: 1.5; border: 1px solid #e0e0e0; max-height: 520px; }
-  code { background: #f1f3f5; padding: 1px 5px; border-radius: 3px; font-size: 14px; }
-  .drag { display: inline-block; padding: 12px 22px; background: #003876; color: white !important; text-decoration: none; border-radius: 5px; font-weight: 600; box-shadow: 0 2px 4px rgba(0,0,0,.15); }
-  .drag:hover { background: #002855; }
-  .drag:active { transform: translateY(1px); }
-  .note { background: #fff8e1; border-left: 4px solid #ffa000; padding: 10px 14px; margin: 16px 0; border-radius: 0 4px 4px 0; }
-  .note strong { color: #b45309; }
-  .new { background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 10px 14px; margin: 16px 0; border-radius: 0 4px 4px 0; }
-  .new strong { color: #1b5e20; }
-  ol li, ul li { margin: 4px 0; }
-</style>
-</head>
-<body>
+/*
+ * a11y: Accessible Names — bookmarklet source.
+ *
+ * This file is also embedded inside ../accesslens.html, which is the
+ * install page (drag-to-bookmark). Edit either; the HTML reads its <script>
+ * block and URL-encodes it to produce the bookmarklet href, so changes to
+ * the HTML's embedded copy take effect immediately when the page reloads.
+ *
+ * Copyright (C) 2026 CNIB.
+ * Licensed under the GNU General Public License v3.0 or later.
+ */
 
-<h1>Accessible Names Bookmarklet</h1>
-<p class="sub">Self-contained. No network calls. UI is sandboxed in a Shadow DOM so site styles can't bleed in. All UI text is at least 16px for readability.</p>
-
-<h2>Install</h2>
-<p>Drag this button to your bookmarks bar:</p>
-<p><a id="bm" class="drag" href="#">a11y: names</a></p>
-
-<h2>Use</h2>
-<ol>
-  <li>Visit the page you want to inspect.</li>
-  <li>Click the <strong>a11y: names</strong> bookmark.</li>
-  <li>Each interactive element gets an outline and a badge above it with its computed accessible name; anything missing a name is red.</li>
-  <li>Floating panel on the right lists everything. Click a row to scroll and flash that element.</li>
-  <li><strong>Copy MD</strong> puts a Markdown table on your clipboard; DevTools console has the same as <code>console.table</code> plus the raw Markdown.</li>
-  <li>Click the bookmark again, or hit <strong>Close</strong>, to clear.</li>
-</ol>
-
-<div class="new">
-<strong>UI isolation.</strong> The panel and badges live inside a Shadow DOM with <code>:host { all: initial }</code> and explicit font-family on every selector. Pages that set <code>* { font-family: Lobster }</code> or similar can no longer bleed into the inspector's UI. Outlines on inspected elements are set with <code>!important</code> so site-wide <code>outline: none</code> resets can't suppress them.
-</div>
-
-<div class="note">
-<strong>Cross-origin iframes.</strong> Same-origin policy prevents the bookmarklet from looking inside iframes loaded from a different origin. The panel reports how many frames were skipped. For full coverage across all frames, use the <a href="https://github.com/CNIB-AccessLabs/AccessibleName/tree/main/firefox-extension">Firefox</a> or <a href="https://github.com/CNIB-AccessLabs/AccessibleName/tree/main/chrome-extension">Chrome</a> extension.
-</div>
-
-<h2>Source</h2>
-<pre id="src"></pre>
-
-<script id="bookmarklet-source" type="text/template">
 (function () {
   'use strict';
   var P = '__a11yn_';
@@ -504,14 +462,3 @@
     console.log('%c[a11y-names] cleared.', 'color:#003876');
   };
 })();
-</script>
-
-<script>
-  (function () {
-    var src = document.getElementById('bookmarklet-source').textContent.trim();
-    document.getElementById('src').textContent = src;
-    document.getElementById('bm').setAttribute('href', 'javascript:' + encodeURIComponent(src));
-  })();
-</script>
-</body>
-</html>

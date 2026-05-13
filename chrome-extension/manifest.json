@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "AccessibleName Inspector",
+  "name": "CNIB AccessLens",
   "version": "1.1.0",
-  "description": "Multi-check accessibility inspector: accessible names, headings, and more. Reports across iframes (including cross-origin) and shadow DOM. No network calls.",
+  "description": "Multi-check accessibility inspector from CNIB Access Labs: accessible names, headings, contrast, focus order, forms, ARIA, and more. Reports across iframes (including cross-origin) and shadow DOM. No network calls.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -12,7 +12,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "AccessibleName Inspector",
+    "default_title": "CNIB AccessLens",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",

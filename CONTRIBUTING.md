@@ -4,7 +4,7 @@ Thanks for considering a contribution. This project is built and maintained by C
 
 ## Bug reports
 
-Open an [issue](https://github.com/CNIB-AccessLabs/AccessibleName/issues) with:
+Open an [issue](https://github.com/CNIB-AccessLabs/AccessLensPlugins/issues) with:
 
 - Which tool (bookmarklet / Firefox extension / Chrome extension)
 - Browser and version
@@ -18,7 +18,7 @@ For pages behind authentication (the Dayforce-shaped case the tool was built for
 
 The three tools share most of their JavaScript. If your change is to the scanner or display logic, it should ideally land in all three:
 
-- `bookmarklet/src/a11y-names.js` and the embedded `<script id="bookmarklet-source">` block in `bookmarklet/a11y-names.html`
+- `bookmarklet/src/accesslens.js` and the embedded `<script id="bookmarklet-source">` block in `bookmarklet/accesslens.html`
 - `firefox-extension/background.js`
 - `chrome-extension/background.js` (currently a byte-identical copy of the Firefox `background.js`)
 

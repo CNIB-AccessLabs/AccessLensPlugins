@@ -1,6 +1,12 @@
-# AccessibleName
+<p align="center">
+  <img src="./brand/cnib-access-labs-lockup.png" alt="CNIB Access Labs" width="480">
+</p>
 
-Lightweight, self-contained accessibility tooling that reports the **computed accessible name** of every interactive element on a web page — across iframes (including cross-origin) and shadow DOM.
+# AccessLens Plugins
+
+The public, browser-side companion to **CNIB AccessLens** (the main accessibility-testing platform). This repository ships three self-contained tools — a bookmarklet, a Firefox extension, and a Chrome extension — that run a growing battery of accessibility checks directly in the browser without calling home, without telemetry, and without external dependencies.
+
+Started life as a single accessible-name inspector and has grown into a 21-check toolkit covering names, headings, landmarks, images, links, ARIA, contrast, focus order, forms, tables, iframes, lists, touch targets, skip links, media, focus visibility, reflow, non-text contrast, and animation — all reporting across iframes (including cross-origin) and shadow DOM.
 
 Built by [CNIB Access Labs](https://github.com/CNIB-AccessLabs) to make accessibility testing on enterprise SaaS (Dayforce, Workday, ServiceNow, anything iframe-heavy) faster than dropping into ANDI for every quick check. The same code ships three ways so you can pick the right tool for the situation:
 
@@ -16,7 +22,7 @@ For a deeper read on the algorithm and architecture, see [`docs/ACCESSIBLE_NAME_
 
 ## Quick start
 
-**Bookmarklet (30 seconds):** Open [`bookmarklet/a11y-names.html`](./bookmarklet/a11y-names.html) in your browser, drag the **a11y: names** button to your bookmarks bar, then click it on any page you want to inspect.
+**Bookmarklet (30 seconds):** Open [`bookmarklet/accesslens.html`](./bookmarklet/accesslens.html) in your browser, drag the **a11y: names** button to your bookmarks bar, then click it on any page you want to inspect.
 
 **Firefox extension (1 minute):** Go to `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on**, point at [`firefox-extension/manifest.json`](./firefox-extension/manifest.json). Click the toolbar icon to open the inspector menu.
 
@@ -44,7 +50,7 @@ The bookmarklet still has its place — no install, no maintenance, easy to shar
 
 ## What it does *not* do
 
-This is a **name inspector**, not a full accessibility scanner. It tells you whether interactive elements have accessible names; it does not check colour contrast, heading order, ARIA validity, focus visibility, or any of the other dozens of WCAG criteria. For those, use axe DevTools or your existing scanner. AccessibleName fills a narrow gap: rapid "does this control have a name and where does it come from?" inspection, especially inside iframes that other tools struggle with.
+This is a **name inspector**, not a full accessibility scanner. It tells you whether interactive elements have accessible names; it does not check colour contrast, heading order, ARIA validity, focus visibility, or any of the other dozens of WCAG criteria. For those, use axe DevTools or your existing scanner. AccessLens fills a narrow gap: rapid "does this control have a name and where does it come from?" inspection, especially inside iframes that other tools struggle with.
 
 It also can't find `<div>` elements made interactive purely through `addEventListener('click', …)` with no role, `tabindex`, inline `onclick`, or other semantic marker. That's not a bug — assistive technology can't find those either. When the tool is silent on a visible interactive control, that itself is the diagnosis: the page has no semantic for it.
 

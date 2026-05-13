@@ -1,5 +1,5 @@
 /*
- * AccessibleName Inspector — background script.
+ * CNIB AccessLens — background script.
  *
  * Multi-check accessibility inspector. The toolbar button opens popup.html;
  * the popup lets the user pick a check to run, or close the active one.

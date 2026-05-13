@@ -1,6 +1,6 @@
-# AccessibleName — Firefox WebExtension
+# AccessLens — Firefox WebExtension
 
-Manifest V3 Firefox extension that runs the AccessibleName scanner in every frame the tab loads, including cross-origin iframes. One panel in the top frame aggregates results from every frame with badges positioned correctly over each element.
+Manifest V3 Firefox extension that runs the AccessLens scanner in every frame the tab loads, including cross-origin iframes. One panel in the top frame aggregates results from every frame with badges positioned correctly over each element.
 
 This is what the [bookmarklet](../bookmarklet) can't do: same-origin policy blocks page-context scripts from looking inside cross-origin iframes. A WebExtension content script is granted host permissions on install, so the browser allows it to run in every frame regardless of origin.
 
@@ -18,7 +18,7 @@ Temporary add-ons disappear when Firefox closes. See "Permanent install" below.
 
 ## Use
 
-- Click the **AccessibleName Inspector** toolbar button on any page; a small popup lets you pick which check to run.
+- Click the **CNIB AccessLens** toolbar button on any page; a small popup lets you pick which check to run.
 - Each interactive element gets an outline and a badge with its computed accessible name. Top-frame elements use blue; iframe elements use green. Anything missing a name is red.
 - The right-side panel lists everything across every frame. Click a row to jump to that element.
 - **Copy MD** puts a Markdown table on your clipboard for your notebook. The same table is in DevTools console alongside a `console.table` view.
@@ -29,7 +29,7 @@ Temporary add-ons disappear when Firefox closes. See "Permanent install" below.
 Firefox blocks unsigned permanent installs by default. Three paths from least to most effort:
 
 1. **Firefox Developer Edition or Nightly.** In `about:config`, set `xpinstall.signatures.required` to `false`, then drop a packed `.xpi` (just zip the contents of this folder and rename to `.xpi`) into Firefox.
-2. **Enterprise Firefox policy.** If your IT has Firefox ESR or managed Firefox, an enterprise policy can allow specific extension IDs to install unsigned. The ID in this manifest is `a11y-names@cnib.ca`. Talk to whoever manages the Firefox config in your environment.
+2. **Enterprise Firefox policy.** If your IT has Firefox ESR or managed Firefox, an enterprise policy can allow specific extension IDs to install unsigned. The ID in this manifest is `accesslens@cnib.ca`. Talk to whoever manages the Firefox config in your environment.
 3. **Mozilla AMO signing.** Submit to https://addons.mozilla.org/ as an unlisted add-on — Mozilla signs it and you can self-distribute the signed `.xpi` for permanent install with no `about:config` changes. Free and reasonably fast.
 
 ## What it inspects

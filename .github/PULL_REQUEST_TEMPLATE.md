@@ -6,17 +6,17 @@
 
 ## Which tools does it touch
 
-- [ ] Bookmarklet (`bookmarklet/a11y-names.html` and `bookmarklet/src/a11y-names.js`)
+- [ ] Bookmarklet (`bookmarklet/accesslens.html` and `bookmarklet/src/accesslens.js`)
 - [ ] Firefox extension (`firefox-extension/background.js`)
 - [ ] Chrome extension (`chrome-extension/background.js`)
 - [ ] Docs (`README.md`, `docs/*`)
 - [ ] Manifests / icons / packaging
 
-> If you changed the scanner or display logic, it should land in all three of the first three boxes. The bookmarklet has its source embedded in the HTML *and* in `src/a11y-names.js`; both copies need to match. See `CONTRIBUTING.md`.
+> If you changed the scanner or display logic, it should land in all three of the first three boxes. The bookmarklet has its source embedded in the HTML *and* in `src/accesslens.js`; both copies need to match. See `CONTRIBUTING.md`.
 
 ## How you tested it
 
-<!-- AccessibleName has no automated tests. Tell us what you ran the build against. Screenshots
+<!-- AccessLens has no automated tests. Tell us what you ran the build against. Screenshots
      of the panel on representative pages are gold. -->
 
 - [ ] A simple page with standard form controls

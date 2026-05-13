@@ -1,4 +1,4 @@
-# AccessibleName — Chrome / Edge / Brave Extension
+# AccessLens — Chrome / Edge / Brave Extension
 
 Same functionality as the [Firefox extension](../firefox-extension): inspects the computed accessible name of every interactive element across all frames including cross-origin iframes plus open shadow DOM. One panel in the top frame with badges over every element. No network calls.
 

@@ -17,7 +17,7 @@ The extensions handle cross-origin iframes by using a privilege the bookmarklet 
 
 The same scanner logic lives in three places:
 
-- `bookmarklet/src/a11y-names.js` (also embedded in `bookmarklet/a11y-names.html`)
+- `bookmarklet/src/accesslens.js` (also embedded in `bookmarklet/accesslens.html`)
 - `firefox-extension/background.js` (as the `scanFrame` function passed to `scripting.executeScript`)
 - `chrome-extension/background.js` (byte-identical copy of the Firefox `background.js`)
 
@@ -108,7 +108,7 @@ All three tools support click-to-show, click-again-to-clear:
 ## Files at a glance
 
 ```
-AccessibleName/
+AccessLens/
 ├── LICENSE                            GPL-3.0
 ├── README.md                          Project overview
 ├── CHANGELOG.md
@@ -117,9 +117,9 @@ AccessibleName/
 │   ├── ARCHITECTURE.md                (this file)
 │   └── ACCESSIBLE_NAME_COMPUTATION.md What the algorithm computes
 ├── bookmarklet/
-│   ├── a11y-names.html                Drag-to-install page with the bookmarklet embedded
+│   ├── accesslens.html                Drag-to-install page with the bookmarklet embedded
 │   └── src/
-│       └── a11y-names.js              Readable source (also embedded in the HTML)
+│       └── accesslens.js              Readable source (also embedded in the HTML)
 ├── firefox-extension/
 │   ├── manifest.json                  MV3 with background.scripts (event page)
 │   ├── background.js                  Toolbar handler + scanFrame + displayResults

@@ -18,7 +18,7 @@ assignees: ''
 
 - Browser and version:
 - OS:
-- AccessibleName version (from CHANGELOG.md or the manifest):
+- AccessLens version (from CHANGELOG.md or the manifest):
 
 ## What happened
 
