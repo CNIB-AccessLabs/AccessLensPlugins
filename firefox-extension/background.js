@@ -35,7 +35,8 @@ const CHECKS = {
   buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons },
   lists:     { label: "Lists",            scan: scanLists,     display: displayLists     },
   targetsize:{ label: "Target size",      scan: scanTargetSize, display: displayTargetSize },
-  skiplinks: { label: "Skip links",       scan: scanSkipLinks, display: displaySkipLinks  }
+  skiplinks: { label: "Skip links",       scan: scanSkipLinks, display: displaySkipLinks  },
+  media:     { label: "Media",            scan: scanMedia,     display: displayMedia     }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -12772,6 +12773,759 @@ function displaySkipLinks(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Skip Links check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: MEDIA — audio / video / third-party player inspector
+ *
+ * WCAG 1.2.x, 1.4.2 Audio Control, 2.2.2 Pause Stop Hide.
+ *
+ * Inventories every <audio>, <video>, <object type="...">, <embed
+ * type="...">, plus any <iframe> whose src host matches a known
+ * media-provider pattern (YouTube, Vimeo, Wistia, Dailymotion, Twitch,
+ * Loom, Vidyard, SoundCloud, Spotify).
+ *
+ * Per-element flags:
+ *   no-controls               <video>/<audio> without controls attribute
+ *   autoplay                  autoplay attribute (1.4.2 / 2.2.2)
+ *   autoplay-with-loop        autoplay + loop on same element (plays forever)
+ *   autoplay-muted-no-controls  muted autoplay video w/o controls
+ *   video-no-captions         <video> with no <track kind=captions|subtitles>
+ *   captions-default-off      tracks exist but no default attribute
+ *   video-no-poster           <video> without poster (informational)
+ *   video-no-transcript       <video> with no nearby transcript link
+ *   audio-no-transcript       <audio> with no nearby transcript link
+ *   embed-autoplay-in-url     iframe URL has autoplay parameter
+ *   embed-no-title            media iframe without title/aria-label
+ * ==================================================================== */
+
+function scanMedia() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+
+    var TRANSCRIPT_RE = /\btranscript|text\s+alternative|read\s+transcript|view\s+transcript|caption\s+file|subtitle\s+file/i;
+
+    // Maps an iframe URL hostname/pathname pattern to a provider chip label.
+    var PROVIDERS = [
+      { name: "YouTube",    test: function (u) { return /(?:^|\.)(youtube|youtube-nocookie)\.com$/.test(u.hostname) && /\/embed\//.test(u.pathname); } },
+      { name: "Vimeo",      test: function (u) { return u.hostname === "player.vimeo.com"; } },
+      { name: "Wistia",     test: function (u) { return /\.wistia\.(com|net)$/.test(u.hostname); } },
+      { name: "Dailymotion", test: function (u) { return /(?:^|\.)dailymotion\.com$/.test(u.hostname) && /\/embed\//.test(u.pathname); } },
+      { name: "Twitch",     test: function (u) { return /^(player|clips)\.twitch\.tv$/.test(u.hostname); } },
+      { name: "Loom",       test: function (u) { return u.hostname === "www.loom.com" && /\/embed\//.test(u.pathname); } },
+      { name: "Vidyard",    test: function (u) { return u.hostname === "play.vidyard.com"; } },
+      { name: "SoundCloud", test: function (u) { return u.hostname === "w.soundcloud.com"; } },
+      { name: "Spotify",    test: function (u) { return u.hostname === "open.spotify.com" && /\/embed/.test(u.pathname); } }
+    ];
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function computeAccName(el) {
+      if (!el) return "";
+      var alb = el.getAttribute && el.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return joined;
+      }
+      var al = el.getAttribute && el.getAttribute("aria-label");
+      if (al && al.trim()) return al.trim();
+      // <iframe> uses title.
+      if (el.tagName === "IFRAME") {
+        var t = el.getAttribute("title");
+        if (t && t.trim()) return t.trim();
+      }
+      var ti = el.getAttribute && el.getAttribute("title");
+      if (ti && ti.trim()) return ti.trim();
+      return "";
+    }
+
+    function findProviderForIframe(iframe) {
+      var src = iframe.getAttribute("src") || iframe.getAttribute("data-src") || "";
+      if (!src) return null;
+      var u;
+      try { u = new URL(src, location.href); } catch (e) { return null; }
+      for (var i = 0; i < PROVIDERS.length; i++) {
+        if (PROVIDERS[i].test(u)) return { name: PROVIDERS[i].name, parsed: u, raw: src };
+      }
+      return null;
+    }
+
+    function autoplayInUrl(u) {
+      if (!u) return false;
+      // Check query and fragment
+      var qs = (u.search || "") + "&" + (u.hash || "");
+      // YouTube: autoplay=1
+      // Vimeo: autoplay=1
+      // Spotify embed often has none
+      // Wistia: autoPlay=true
+      if (/[?&#](autoplay|autoplay)=([1y]|true|on)\b/i.test(qs)) return true;
+      if (/[?&#]auto[_-]?play=([1y]|true|on)\b/i.test(qs)) return true;
+      // Wistia case-sensitive 'autoPlay'
+      if (/[?&#]autoPlay=true\b/.test(qs)) return true;
+      return false;
+    }
+
+    function tracksOf(el) {
+      var tracks = [];
+      var trackEls = el.querySelectorAll(":scope > track");
+      for (var i = 0; i < trackEls.length; i++) {
+        var tr = trackEls[i];
+        tracks.push({
+          kind: (tr.getAttribute("kind") || "subtitles").toLowerCase(),
+          srclang: tr.getAttribute("srclang") || "",
+          label: tr.getAttribute("label") || "",
+          src: tr.getAttribute("src") || "",
+          isDefault: tr.hasAttribute("default")
+        });
+      }
+      return tracks;
+    }
+
+    function transcriptNearby(el) {
+      var node = el;
+      for (var hop = 0; hop < 4; hop++) {
+        if (!node || node.nodeType !== 1) break;
+        // Search for transcript-looking links within this ancestor.
+        var links;
+        try { links = node.querySelectorAll("a[href], button"); } catch (e) { links = []; }
+        for (var i = 0; i < links.length; i++) {
+          var l = links[i];
+          if (l === el) continue;
+          var t = txt(l);
+          var href = l.getAttribute("href") || "";
+          if (TRANSCRIPT_RE.test(t) || TRANSCRIPT_RE.test(href)) {
+            return { text: t, href: href, sel: uniqueSelector(l) };
+          }
+        }
+        // Also accept any node containing the literal "Transcript" as a heading
+        var headings;
+        try { headings = node.querySelectorAll("h1,h2,h3,h4,h5,h6"); } catch (e) { headings = []; }
+        for (var j = 0; j < headings.length; j++) {
+          var ht = txt(headings[j]);
+          if (TRANSCRIPT_RE.test(ht)) {
+            return { text: ht, href: "", sel: uniqueSelector(headings[j]) };
+          }
+        }
+        node = node.parentNode;
+      }
+      return null;
+    }
+
+    function analyseVideo(el) {
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        kind: "video",
+        provider: "",
+        accName: computeAccName(el),
+        src: el.currentSrc || el.getAttribute("src") || "",
+        controls: el.hasAttribute("controls"),
+        autoplay: el.hasAttribute("autoplay"),
+        muted: el.hasAttribute("muted") || el.muted,
+        loop: el.hasAttribute("loop"),
+        poster: el.getAttribute("poster") || "",
+        tracks: tracksOf(el),
+        width: 0,
+        height: 0,
+        hidden: isHidden(el),
+        transcript: null,
+        issues: [],
+        _resolveSel: uniqueSelector(el)
+      };
+      try {
+        var rect = el.getBoundingClientRect();
+        entry.width = Math.round(rect.width);
+        entry.height = Math.round(rect.height);
+      } catch (e) {}
+
+      if (!entry.controls) {
+        entry.issues.push({
+          type: "no-controls",
+          text: "<video> has no controls attribute. Keyboard / SR users may have no way to play, pause, or seek (unless a custom JS UI is wired up — those aren't statically inspectable)."
+        });
+      }
+      if (entry.autoplay) {
+        if (entry.loop) {
+          entry.issues.push({
+            type: "autoplay-with-loop",
+            text: "<video> has both autoplay and loop — it plays forever without user action. WCAG 2.2.2 violation."
+          });
+        } else if (entry.muted && !entry.controls) {
+          entry.issues.push({
+            type: "autoplay-muted-no-controls",
+            text: "Muted autoplay <video> without controls. Browsers allow muted autoplay, but users still need a way to pause / hide moving content (WCAG 2.2.2)."
+          });
+        } else {
+          entry.issues.push({
+            type: "autoplay",
+            text: "<video autoplay>. WCAG 1.4.2 requires audio control if it plays for more than 3 seconds; 2.2.2 requires a pause/stop/hide mechanism."
+          });
+        }
+      }
+
+      var captionTracks = entry.tracks.filter(function (t) { return t.kind === "captions" || t.kind === "subtitles"; });
+      if (captionTracks.length === 0) {
+        entry.issues.push({
+          type: "video-no-captions",
+          text: "<video> has no <track kind=\"captions\"> or <track kind=\"subtitles\"> children. WCAG 1.2.2 Captions (Prerecorded)."
+        });
+      } else if (!captionTracks.some(function (t) { return t.isDefault; })) {
+        entry.issues.push({
+          type: "captions-default-off",
+          text: captionTracks.length + " caption/subtitle track(s) present but none has the default attribute. Captions exist but the user has to dig for them."
+        });
+      }
+
+      if (!entry.poster) {
+        // Informational; common to flag but not a hard issue.
+        entry.issues.push({
+          type: "video-no-poster",
+          text: "<video> has no poster attribute. Not a WCAG issue, but a poster gives sighted users a preview before play."
+        });
+      }
+
+      entry.transcript = transcriptNearby(el);
+      if (!entry.transcript) {
+        entry.issues.push({
+          type: "video-no-transcript",
+          text: "No transcript link or heading found within 3 ancestor levels (text searched: /transcript|text alternative|caption file|subtitle file/i). WCAG 1.2.3 / 1.2.5 can be met via transcript."
+        });
+      }
+      return entry;
+    }
+
+    function analyseAudio(el) {
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        kind: "audio",
+        provider: "",
+        accName: computeAccName(el),
+        src: el.currentSrc || el.getAttribute("src") || "",
+        controls: el.hasAttribute("controls"),
+        autoplay: el.hasAttribute("autoplay"),
+        muted: el.hasAttribute("muted") || el.muted,
+        loop: el.hasAttribute("loop"),
+        poster: "",
+        tracks: tracksOf(el),
+        width: 0,
+        height: 0,
+        hidden: isHidden(el),
+        transcript: null,
+        issues: [],
+        _resolveSel: uniqueSelector(el)
+      };
+      try {
+        var rect = el.getBoundingClientRect();
+        entry.width = Math.round(rect.width);
+        entry.height = Math.round(rect.height);
+      } catch (e) {}
+
+      if (!entry.controls) {
+        entry.issues.push({
+          type: "no-controls",
+          text: "<audio> has no controls attribute. Keyboard / SR users may have no way to play, pause, or seek."
+        });
+      }
+      if (entry.autoplay) {
+        if (entry.loop) {
+          entry.issues.push({
+            type: "autoplay-with-loop",
+            text: "<audio> has both autoplay and loop — plays forever. WCAG 2.2.2 violation."
+          });
+        } else {
+          entry.issues.push({
+            type: "autoplay",
+            text: "<audio autoplay>. WCAG 1.4.2 requires a pause/stop/mute mechanism if it plays for more than 3 seconds."
+          });
+        }
+      }
+
+      entry.transcript = transcriptNearby(el);
+      if (!entry.transcript) {
+        entry.issues.push({
+          type: "audio-no-transcript",
+          text: "<audio> with no transcript link/heading nearby. WCAG 1.2.1 requires a text alternative for audio-only content."
+        });
+      }
+      return entry;
+    }
+
+    function analyseMediaIframe(iframe, provider) {
+      var u = provider.parsed;
+      var hasTitle = !!iframe.getAttribute("title") || !!iframe.getAttribute("aria-label") || !!iframe.getAttribute("aria-labelledby");
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(iframe),
+        kind: "embed",
+        provider: provider.name,
+        accName: computeAccName(iframe),
+        src: provider.raw,
+        controls: true, // assumed; player provides its own
+        autoplay: autoplayInUrl(u),
+        muted: false,
+        loop: false,
+        poster: "",
+        tracks: [],
+        width: 0,
+        height: 0,
+        hidden: isHidden(iframe),
+        transcript: null,
+        issues: [],
+        _resolveSel: uniqueSelector(iframe)
+      };
+      try {
+        var rect = iframe.getBoundingClientRect();
+        entry.width = Math.round(rect.width);
+        entry.height = Math.round(rect.height);
+      } catch (e) {}
+
+      if (!hasTitle) {
+        entry.issues.push({
+          type: "embed-no-title",
+          text: provider.name + " iframe has no title, aria-label, or aria-labelledby. WCAG 4.1.2 + 2.4.1. (Also flagged in the Iframes check.)"
+        });
+      }
+      if (entry.autoplay) {
+        entry.issues.push({
+          type: "embed-autoplay-in-url",
+          text: provider.name + " iframe has an autoplay parameter in its URL. WCAG 1.4.2 / 2.2.2 — embedded players autoplay just like native media."
+        });
+      }
+
+      entry.transcript = transcriptNearby(iframe);
+      // For embeds we don't flag the missing transcript as hard issue
+      // (provider may have captions; impossible to verify statically).
+      return entry;
+    }
+
+    function walk(root) {
+      if (!root) return;
+      var videos;
+      try { videos = root.querySelectorAll("video"); } catch (e) { videos = []; }
+      for (var i = 0; i < videos.length; i++) results.push(analyseVideo(videos[i]));
+
+      var audios;
+      try { audios = root.querySelectorAll("audio"); } catch (e) { audios = []; }
+      for (var j = 0; j < audios.length; j++) results.push(analyseAudio(audios[j]));
+
+      // Media iframes.
+      var iframes;
+      try { iframes = root.querySelectorAll("iframe"); } catch (e) { iframes = []; }
+      for (var k = 0; k < iframes.length; k++) {
+        var prov = findProviderForIframe(iframes[k]);
+        if (prov) results.push(analyseMediaIframe(iframes[k], prov));
+      }
+
+      // Shadow DOM.
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var s = 0; s < all.length; s++) {
+        if (all[s].shadowRoot) {
+          shadowRoots++;
+          walk(all[s].shadowRoot);
+        }
+      }
+    }
+
+    walk(document);
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayMedia(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var vid = 0, aud = 0, emb = 0, autop = 0, withIssues = 0, hiddenCount = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.kind === "video") vid++;
+      else if (c.kind === "audio") aud++;
+      else if (c.kind === "embed") emb++;
+      if (c.autoplay) autop++;
+      if (c.hidden) hiddenCount++;
+      if (c.issues && c.issues.length) withIssues++;
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 520px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.video { background: #1a7f1a; color: #fff; }' +
+      '.chip.audio { background: #6f42c1; color: #fff; }' +
+      '.chip.embed { background: #d97706; color: #fff; }' +
+      '.chip.flag { background: #b00020; color: #fff; }' +
+      '.chip.info { background: #555; color: #fff; font-weight: 500; }' +
+      '.chip.hidden { background: #707070; color: #fff; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.name.missing { color: #b00020; font-style: italic; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.src { font-family: ui-monospace, monospace !important; font-size: 12px; color: #555; word-break: break-all; margin-top: 4px; }' +
+      '.tracks { background: #f4f7ff; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 4px; }' +
+      '.tx { color: #1a5a1a; font-size: 13px; margin-top: 4px; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-video li.row:not(.is-video) { display: none; }' +
+      '.panel.filter-audio li.row:not(.is-audio) { display: none; }' +
+      '.panel.filter-embeds li.row:not(.is-embed) { display: none; }' +
+      '.panel.filter-autoplay li.row:not(.is-autoplay) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Media (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      vid + " <video>",
+      aud + " <audio>",
+      emb ? (emb + " embed") : null,
+      autop ? (autop + " autoplay") : null,
+      hiddenCount ? (hiddenCount + " hidden") : null,
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="video">Video (' + vid + ')</button>' +
+            '<button data-filter="audio">Audio (' + aud + ')</button>' +
+            '<button data-filter="embeds">Embeds (' + emb + ')</button>' +
+            '<button data-filter="autoplay">Autoplay (' + autop + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.kind === "video") classes.push("is-video");
+      else if (t.kind === "audio") classes.push("is-audio");
+      else if (t.kind === "embed") classes.push("is-embed");
+      if (t.autoplay) classes.push("is-autoplay");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      var typeChip = "info";
+      var typeLabel = t.kind;
+      if (t.kind === "video") { typeChip = "video"; typeLabel = "&lt;video&gt;"; }
+      else if (t.kind === "audio") { typeChip = "audio"; typeLabel = "&lt;audio&gt;"; }
+      else if (t.kind === "embed") { typeChip = "embed"; typeLabel = t.provider; }
+      html += '<span class="chip ' + typeChip + '">' + typeLabel + '</span>';
+
+      if (t.autoplay) html += '<span class="chip flag">autoplay</span>';
+      if (t.loop) html += '<span class="chip flag">loop</span>';
+      if (t.muted) html += '<span class="chip info">muted</span>';
+      if (!t.controls && t.kind !== "embed") html += '<span class="chip flag">no controls</span>';
+      if (t.hidden) html += '<span class="chip hidden">HIDDEN</span>';
+
+      if (t.accName) {
+        html += '<span class="name">' + esc(t.accName.length > 60 ? t.accName.slice(0, 60) + "…" : t.accName) + '</span>';
+      } else if (t.kind === "embed") {
+        html += '<span class="name missing">(no title/aria-label)</span>';
+      }
+
+      var metaParts = [];
+      metaParts.push(t.width + "×" + t.height + " px");
+      if (t.poster) metaParts.push("poster ✓");
+      if (t._frameUrl && !t._frameIsTop) metaParts.push("in frame");
+      html += '<div class="meta">' + esc(metaParts.join(" · ")) + '</div>';
+
+      if (t.tracks && t.tracks.length > 0) {
+        var tracksDesc = t.tracks.map(function (tr) {
+          return tr.kind + (tr.srclang ? "/" + tr.srclang : "") + (tr.isDefault ? " (default)" : "") + (tr.label ? " “" + tr.label + "”" : "");
+        }).join(", ");
+        html += '<div class="tracks">Tracks: ' + esc(tracksDesc) + '</div>';
+      } else if (t.kind === "video") {
+        html += '<div class="tracks" style="background:#fdecec; color:#7a0000;">No &lt;track&gt; children</div>';
+      }
+
+      if (t.transcript) {
+        html += '<div class="tx">✓ Transcript-looking element nearby: "' + esc(t.transcript.text || t.transcript.href || "") + '"</div>';
+      } else if (t.kind !== "embed") {
+        html += '<div class="tx" style="color:#7a0000;">✗ No transcript link or heading found within 3 ancestors</div>';
+      }
+
+      if (t.src) html += '<div class="src" title="' + esc(t.src) + '">src: ' + esc(t.src.length > 120 ? t.src.slice(0, 120) + "…" : t.src) + '</div>';
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 1.2.1–1.2.5 · 1.4.2 Audio Control · 2.2.2 Pause Stop Hide. Limitations: custom JS-driven controls/captions are invisible to static inspection; we can\'t tell whether captions or transcripts are accurate, just whether they exist; media duration unknown so the 1.4.2 "under 3 seconds" exception isn\'t applied; live captions can\'t be evaluated.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = (o.issues && o.issues.length) ? "#b00020" : "#003876";
+          o._resolveEl.style.setProperty("outline", "3px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Media\n\n";
+    md += "Counts: " + vid + " <video>, " + aud + " <audio>";
+    if (emb) md += ", " + emb + " embed";
+    if (autop) md += ", " + autop + " autoplay";
+    md += ", " + withIssues + " with issues.\n\n";
+    md += "| # | Kind | Name | Controls | Autoplay | Tracks | Transcript | Issues | Selector |\n";
+    md += "|---|------|------|----------|----------|--------|------------|--------|----------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var name = (mt.accName || (mt.kind === "embed" ? mt.provider : mt.kind)).replace(/\|/g, "\\|");
+      var trackStr = mt.tracks.length ? mt.tracks.map(function (tr) { return tr.kind; }).join(",") : "—";
+      var txStr = mt.transcript ? "yes" : "—";
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | " + (mt.kind === "embed" ? mt.provider : mt.kind) +
+            " | " + name +
+            " | " + (mt.controls ? "yes" : "no") +
+            " | " + (mt.autoplay ? "yes" : "no") +
+            " | " + trackStr +
+            " | " + txStr +
+            " | " + issueStr +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "` |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Media check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}

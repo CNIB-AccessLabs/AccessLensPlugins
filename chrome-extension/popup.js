@@ -24,7 +24,8 @@ const CHECK_LABELS = {
   buttons: "Buttons & interactive",
   lists: "Lists",
   targetsize: "Target size",
-  skiplinks: "Skip links"
+  skiplinks: "Skip links",
+  media: "Media"
 };
 
 async function getActiveTab() {

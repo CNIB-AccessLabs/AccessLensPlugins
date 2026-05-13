@@ -109,6 +109,12 @@
       </button>
       <p class="desc">WCAG 2.4.1 Bypass Blocks. Walks the first 10 focusable elements in DOM order and identifies skip-link candidates: same-page anchors (&lt;a href="#id"&gt;) whose text matches /skip|jump|to main|to content/i OR whose target resolves to &lt;main&gt;, &lt;h1&gt;, [role="main"], or a landmark. For each candidate, validates the target exists, is a main-content anchor, and is focusable (non-interactive targets need tabindex="-1" or focus won't land). Page-level flags: no-skip-link, skip-link-not-first. Limitation: can't actually focus the link to test "visually-hidden-until-focus" CSS — only the current rendered state is observed.</p>
     </li>
+    <li>
+      <button class="check" data-check="media">
+        <span class="label">Media</span>
+      </button>
+      <p class="desc">WCAG 1.2.1–1.2.5, 1.4.2 Audio Control, 2.2.2 Pause Stop Hide. Inventories &lt;video&gt;, &lt;audio&gt;, and third-party player iframes (YouTube, Vimeo, Wistia, Dailymotion, Twitch, Loom, Vidyard, SoundCloud, Spotify). Flags missing controls, autoplay (especially autoplay+loop), &lt;video&gt; with no &lt;track kind="captions"/"subtitles"&gt; children, caption tracks present without a default, missing poster, missing transcript link nearby (heuristic), embed iframes with autoplay parameters in their URL, and embed iframes with no title/aria-label. Limitations: custom JS-driven controls/captions invisible to static inspection; we can't tell whether captions or transcripts are accurate; media duration unknown so the 1.4.2 "under 3 seconds" exception isn't applied.</p>
+    </li>
   </ul>
 </section>
 <footer>
