@@ -6328,10 +6328,38 @@ function displayDocument(framesData, checkId) {
       "</div>" +
       '<div class="body">' + renderFindingBody(f) + "</div>";
 
+    // Determine a per-finding selector for click-to-flash. Only top-frame
+    // findings get wired — cross-frame elements aren't reachable from here.
+    if (f.isTop) {
+      var sel = "";
+      if (f.kind === "element-lang" && f.attr) sel = f.attr.selector || "";
+      else if (f.kind === "hreflang-link" && f.link) sel = f.link.selector || "";
+      else if (f.kind === "foreign-url" && f.link) sel = f.link.selector || "";
+      else if (f.kind === "embedded-lang" && f.embedded) sel = f.embedded.selector || "";
+      else if (f.kind === "html-lang" || f.kind === "html-xml-lang" || f.kind === "html-lang-xml-mismatch") sel = "html";
+      if (sel) li.dataset.sel = sel;
+    }
+
     list.appendChild(li);
   });
 
   shadow.appendChild(panelEl);
+
+  // Wire click-to-flash on every finding row that has a selector.
+  panelEl.querySelectorAll("li[data-sel]").forEach(function (liEl) {
+    liEl.style.cursor = "pointer";
+    liEl.addEventListener("click", function () {
+      var sel = liEl.dataset.sel;
+      var el = null;
+      try { el = document.querySelector(sel); } catch (e) {}
+      if (!el) return;
+      try {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+        setTimeout(function () { try { el.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+      } catch (e) {}
+    });
+  });
 
   /* ----- Markdown ----- */
 
@@ -17770,6 +17798,8 @@ function displayAllChecks(allCheckData, elapsedMs) {
       'details.check .body button.open { font: inherit; font-size: 13px; border: 1px solid #003876; color: #003876; background: #fff; padding: 3px 8px; border-radius: 4px; cursor: pointer; margin-top: 6px; }' +
       'details.check .body button.open:hover { background: #eef4ff; }' +
       '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 4px; }' +
+      '.issue.clickable { cursor: pointer; }' +
+      '.issue.clickable:hover { background: #fbd5d5; outline: 2px solid #b00020; outline-offset: -1px; }' +
       '.issue strong { font-family: ui-monospace, monospace !important; }' +
       '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; margin-top: 2px; }' +
       '.panel.filter-issues details.check:not(.has-issue) { display: none; }' +
@@ -17825,7 +17855,11 @@ function displayAllChecks(allCheckData, elapsedMs) {
       }
       for (var ii2 = 0; ii2 < d._issues.length; ii2++) {
         var iv = d._issues[ii2];
-        html += '<div class="issue"><strong>' + esc(iv.type) + '</strong> #' + esc(iv.idx) + ': ' + esc(iv.text);
+        // Top-frame issues with a parseable selector get a data-sel attribute
+        // so the click handler can locate and flash the element.
+        var clickable = !iv.frameUrl && iv.sel && iv.sel !== "(page-level)";
+        html += '<div class="issue' + (clickable ? ' clickable" data-sel="' + esc(iv.sel) + '"' : '"');
+        html += '><strong>' + esc(iv.type) + '</strong> #' + esc(iv.idx) + ': ' + esc(iv.text);
         if (iv.frameUrl) html += ' <em>(in frame ' + esc(iv.frameUrl) + ')</em>';
         html += '<div class="sel">' + esc(iv.sel) + '</div></div>';
       }
@@ -17902,6 +17936,26 @@ function displayAllChecks(allCheckData, elapsedMs) {
           if (api && api.runtime && api.runtime.sendMessage) {
             api.runtime.sendMessage({ type: "run_from_panel", checkId: checkId });
           }
+        } catch (e) {}
+      });
+    });
+
+    // Click an issue row to scroll the offending element into view and flash it.
+    // Only wired for top-frame issues with a usable selector — cross-frame issues
+    // and page-level issues just stay static.
+    panelEl.querySelectorAll(".issue.clickable").forEach(function (row) {
+      row.addEventListener("click", function () {
+        var sel = row.dataset.sel;
+        if (!sel) return;
+        var el = null;
+        try { el = document.querySelector(sel); } catch (e) {}
+        if (!el) return;
+        try {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+          setTimeout(function () {
+            try { el.style.removeProperty("box-shadow"); } catch (e) {}
+          }, 1400);
         } catch (e) {}
       });
     });
