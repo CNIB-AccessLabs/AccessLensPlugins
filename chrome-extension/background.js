@@ -17891,14 +17891,102 @@ function displayAllChecks(allCheckData, elapsedMs) {
     var totalFindings = 0;
     var crossOriginFrames = 0;
 
+    // Older checks (names, headings, landmarks, images, links, contrast) don't
+    // populate r.issues in their scan output — they derive issues in the display
+    // function. The master panel runs before display, so we mirror that logic
+    // here. Newer checks already include r.issues and skip this path.
+    function deriveIssues(checkId, r, allTopFrameResults) {
+      var out = [];
+      if (checkId === "names") {
+        if (r.missing) {
+          if (r.name) out.push({ type: "placeholder-only", text: "Name comes from placeholder only — not a spec accname" });
+          else out.push({ type: "missing-name", text: "Element has no accessible name" });
+        }
+      } else if (checkId === "images") {
+        if (r.status === "missing") out.push({ type: "missing-alt", text: "Image has no accessible name (no alt, no aria-*)" });
+        else if (r.status === "suspicious") out.push({ type: "suspicious-alt", text: r.suspicious || "Suspicious alt text" });
+      } else if (checkId === "links") {
+        if (r.isEmpty) out.push({ type: "empty-link", text: "Link has no accessible name" });
+        else if (r.isUrlAsText) out.push({ type: "url-as-text", text: "Link text is the URL itself (announced character by character)" });
+        else if (r.isGeneric) out.push({ type: "generic-link-text", text: 'Generic link text "' + (r.name || "") + '" — describe the destination' });
+      } else if (checkId === "contrast") {
+        if (r.status === "fail-aa") out.push({ type: "contrast-fail-aa", text: "Contrast " + (r.ratio != null ? r.ratio.toFixed(2) + ":1 " : "") + "fails WCAG 1.4.3 AA (required " + (r.requiredAA || "") + ":1)" });
+        else if (r.status === "partial-fail") out.push({ type: "contrast-partial-fail", text: "Contrast fails AND text overflows its container" });
+      } else if (checkId === "headings") {
+        if (r.empty) out.push({ type: "empty-heading", text: "Heading has no text content" });
+        if (!r.isNative && r.level === null) out.push({ type: "role-heading-no-aria-level", text: 'role="heading" with no aria-level' });
+        if (r.level !== null && (r.level < 1 || r.level > 6)) out.push({ type: "aria-level-out-of-range", text: "aria-level out of 1–6 range (got " + r.level + ")" });
+        // Cross-row analysis — match displayHeadings logic.
+        if (allTopFrameResults && !r.hidden && r.level !== null) {
+          // Multiple h1.
+          if (r.level === 1) {
+            var h1s = allTopFrameResults.filter(function (o) { return !o.hidden && o.level === 1; });
+            if (h1s.length > 1 && h1s[0] === r) {
+              out.push({ type: "multiple-h1", text: "multiple <h1> elements on the page (" + h1s.length + " total)" });
+            }
+          }
+          // Skipped-level: the previous visible heading had a level > 0 and this one
+          // jumps by more than 1 (e.g. h2 → h4).
+          var idxInList = allTopFrameResults.indexOf(r);
+          if (idxInList > 0) {
+            var prev = null;
+            for (var pi = idxInList - 1; pi >= 0; pi--) {
+              var pr = allTopFrameResults[pi];
+              if (pr && !pr.hidden && pr.level !== null && pr.level >= 1 && pr.level <= 6) { prev = pr; break; }
+            }
+            if (prev && r.level > prev.level + 1) {
+              out.push({ type: "skipped-level", text: "heading level skipped (previous was h" + prev.level + ", this is h" + r.level + ")" });
+            }
+          }
+        }
+      } else if (checkId === "landmarks") {
+        if (r.isLandmark) {
+          if (r.role === "region" && !r.name) {
+            out.push({ type: "region-without-name", text: 'role="region" without an accessible name' });
+          }
+          // Cross-row: multiple-main, same-role landmarks needing names.
+          if (allTopFrameResults && r.role) {
+            var sameRole = allTopFrameResults.filter(function (o) { return o.role === r.role && o.isLandmark; });
+            if (r.role === "main" && sameRole.length > 1) {
+              out.push({ type: "multiple-main", text: "multiple main landmarks on page (only one expected)" });
+            }
+            if (sameRole.length > 1 && !r.name) {
+              out.push({ type: "same-role-needs-name", text: sameRole.length + " " + r.role + " landmarks on page — each needs a distinguishing accessible name" });
+            }
+          }
+        }
+      }
+      return out;
+    }
+
     for (var ci = 0; ci < allCheckData.length; ci++) {
       var entry = allCheckData[ci];
       entry._findings = 0;
       entry._issueCount = 0;
       entry._issues = [];
       entry._pageIssues = [];
+      entry._notices = []; // informational, not counted as issues
       entry._error = entry.error || null;
       if (!entry.frames || entry.frames.length === 0) continue;
+
+      // Aggregate scanner-context warnings that aren't hard issues but are
+      // audit-relevant (e.g. CORS-blocked stylesheets that we couldn't inspect).
+      if (entry.checkId === "focusvis" || entry.checkId === "animation") {
+        var totalUntestable = 0;
+        for (var ufi = 0; ufi < entry.frames.length; ufi++) {
+          totalUntestable += (entry.frames[ufi].untestableSheets || 0);
+        }
+        if (totalUntestable > 0) {
+          entry._notices.push({
+            type: "cross-origin-stylesheets-untestable",
+            text: totalUntestable + " cross-origin stylesheet" +
+                  (totalUntestable === 1 ? "" : "s") +
+                  " couldn't be read due to CORS — their " +
+                  (entry.checkId === "focusvis" ? ":focus" : "animation / @keyframes") +
+                  " rules can't be inspected from script."
+          });
+        }
+      }
 
       for (var fi = 0; fi < entry.frames.length; fi++) {
         var f = entry.frames[fi];
@@ -17923,41 +18011,93 @@ function displayAllChecks(allCheckData, elapsedMs) {
             entry._issueCount++;
           }
         }
-        // Also fold in firstFocusable rows from Skip links etc.
+        // Each check has its own row shape. Build a unified `rows` array.
+        //   - Most checks: f.results (array of objects, each may have .issues)
+        //   - Skip links: f.firstFocusable
+        //   - Forms: f.controls + f.forms (each with .issues using category: key)
         var rows = f.results || [];
         if ((!rows || rows.length === 0) && f.firstFocusable) rows = f.firstFocusable;
+        if (entry.checkId === "forms") {
+          rows = (f.controls || []).concat(f.forms || []);
+        }
         for (var ri = 0; ri < rows.length; ri++) {
           var r = rows[ri];
           entry._findings++;
           totalFindings++;
-          if (r.issues && r.issues.length) {
-            for (var ii = 0; ii < r.issues.length; ii++) {
-              var iss = r.issues[ii];
-              entry._issues.push({
-                idx: r.idx,
-                type: iss.type || "",
-                text: iss.text || "",
-                sel: r.sel || "",
-                frameUrl: f.isTop ? "" : (f.url || ""),
-                frameId: f.frameId,
-                isTop: !!f.isTop
-              });
-              allIssues.push({
-                checkLabel: entry.label,
-                idx: r.idx,
-                type: iss.type || "",
-                text: iss.text || "",
-                sel: r.sel || "",
-                frameUrl: f.isTop ? "" : (f.url || ""),
-                frameId: f.frameId,
-                isTop: !!f.isTop
-              });
-              entry._issueCount++;
-            }
+          // Use scan-time issues if present (newer checks), otherwise derive
+          // them from the result's check-specific fields (older checks).
+          var rowIssues = (r.issues && r.issues.length) ? r.issues : deriveIssues(entry.checkId, r, rows);
+          for (var ii = 0; ii < rowIssues.length; ii++) {
+            var iss = rowIssues[ii];
+            // Older check results use r.selector instead of r.sel.
+            var rsel = r.sel || r.selector || "";
+            // Older check results use r.index instead of r.idx.
+            var ridx = (r.idx != null) ? r.idx : (r.index != null ? r.index : "");
+            // Forms uses iss.category instead of iss.type.
+            var itype = iss.type || iss.category || "";
+            entry._issues.push({
+              idx: ridx,
+              type: itype,
+              text: iss.text || "",
+              sel: rsel,
+              frameUrl: f.isTop ? "" : (f.url || ""),
+              frameId: f.frameId,
+              isTop: !!f.isTop
+            });
+            allIssues.push({
+              checkLabel: entry.label,
+              idx: ridx,
+              type: itype,
+              text: iss.text || "",
+              sel: rsel,
+              frameUrl: f.isTop ? "" : (f.url || ""),
+              frameId: f.frameId,
+              isTop: !!f.isTop
+            });
+            entry._issueCount++;
           }
         }
         if (!f.isTop) crossOriginFrames++;
       }
+    }
+
+    // ---- cross-frame post-aggregation issues ----
+    // Iframes check: a duplicate-name spans frames (one iframe in the top doc may
+    // share a name with one in a nested document). The scan can't see this; the
+    // individual display computes it after aggregating. We replicate here.
+    var iframesEntry = allCheckData.filter(function (c) { return c.checkId === "iframes"; })[0];
+    if (iframesEntry && iframesEntry.frames && iframesEntry.frames.length) {
+      var allIframes = [];
+      iframesEntry.frames.forEach(function (f) {
+        (f.results || []).forEach(function (r) {
+          allIframes.push({ r: r, f: f });
+        });
+      });
+      var byName = {};
+      allIframes.forEach(function (it) {
+        if (!it.r.accName) return;
+        var key = it.r.accName.toLowerCase();
+        if (!byName[key]) byName[key] = [];
+        byName[key].push(it);
+      });
+      Object.keys(byName).forEach(function (k) {
+        var arr = byName[k];
+        if (arr.length < 2) return;
+        arr.forEach(function (it) {
+          var iv = {
+            idx: it.r.idx || "",
+            type: "duplicate-name",
+            text: 'Multiple iframes share the name "' + it.r.accName + '" (' + arr.length + ' total). SR users can\'t distinguish them.',
+            sel: it.r.sel || "",
+            frameUrl: it.f.isTop ? "" : (it.f.url || ""),
+            frameId: it.f.frameId,
+            isTop: !!it.f.isTop
+          };
+          iframesEntry._issues.push(iv);
+          allIssues.push(Object.assign({ checkLabel: iframesEntry.label }, iv));
+          iframesEntry._issueCount++;
+        });
+      });
     }
 
     var totalIssues = allIssues.length;
@@ -17985,6 +18125,12 @@ function displayAllChecks(allCheckData, elapsedMs) {
         md += "\n**Page-level:**\n\n";
         for (var pmd = 0; pmd < e._pageIssues.length; pmd++) {
           md += "- **" + e._pageIssues[pmd].type + "** — " + e._pageIssues[pmd].text + "\n";
+        }
+      }
+      if (e._notices && e._notices.length) {
+        md += "\n**Notices:**\n\n";
+        for (var nmd = 0; nmd < e._notices.length; nmd++) {
+          md += "- _" + e._notices[nmd].type + "_ — " + e._notices[nmd].text + "\n";
         }
       }
       if (e._issues.length) {
@@ -18041,6 +18187,8 @@ function displayAllChecks(allCheckData, elapsedMs) {
       'details.check:last-of-type { border-bottom: none; }' +
       'details.check[open] { background: #f9fbff; }' +
       'details.check.has-issue summary { background: #fdecec; color: #7a0000; }' +
+      'details.check.has-notice summary { background: #fff5e1; color: #7a4a00; }' +
+      'details.check.has-notice summary .count { color: #7a4a00; }' +
       'details.check summary { padding: 12px 14px; cursor: pointer; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; border-top: 1px solid #cfd6e0; }' +
       'details.check:first-of-type summary { border-top: none; }' +
       'details.check summary .count { font-weight: 500; color: #555; margin-left: auto; font-size: 13px; }' +
@@ -18052,6 +18200,8 @@ function displayAllChecks(allCheckData, elapsedMs) {
       '.issue.clickable { cursor: pointer; }' +
       '.issue.clickable:hover { background: #fbd5d5; outline: 2px solid #b00020; outline-offset: -1px; }' +
       '.issue strong { font-family: ui-monospace, monospace !important; }' +
+      '.notice { display: block; background: #fff5e1; color: #7a4a00; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 4px; border-left: 3px solid #d97706; }' +
+      '.notice strong { font-family: ui-monospace, monospace !important; }' +
       '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; margin-top: 2px; }' +
       '.panel.filter-issues details.check:not(.has-issue) { display: none; }' +
       'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
@@ -18089,12 +18239,16 @@ function displayAllChecks(allCheckData, elapsedMs) {
 
     for (var di = 0; di < allCheckData.length; di++) {
       var d = allCheckData[di];
+      var noticesCount = (d._notices || []).length;
       var classes = ["check"];
       if (d._issueCount > 0) classes.push("has-issue");
-      html += '<details class="' + classes.join(" ") + '"' + (d._issueCount > 0 ? " open" : "") + '>';
+      if (noticesCount > 0 && d._issueCount === 0) classes.push("has-notice");
+      var shouldOpen = d._issueCount > 0 || noticesCount > 0;
+      html += '<details class="' + classes.join(" ") + '"' + (shouldOpen ? " open" : "") + '>';
       html += '<summary>' + esc(d.label) +
               '<span class="count">' + d._findings + ' finding' + (d._findings === 1 ? "" : "s") +
               (d._issueCount ? ' · ' + d._issueCount + ' issue' + (d._issueCount === 1 ? "" : "s") : "") +
+              (noticesCount ? ' · ' + noticesCount + ' notice' + (noticesCount === 1 ? "" : "s") : "") +
               '</span></summary>';
       html += '<div class="body">';
       if (d._error) {
@@ -18103,6 +18257,10 @@ function displayAllChecks(allCheckData, elapsedMs) {
       for (var pi2 = 0; pi2 < d._pageIssues.length; pi2++) {
         var pp = d._pageIssues[pi2];
         html += '<div class="issue"><strong>' + esc(pp.type) + '</strong> (page-level): ' + esc(pp.text) + '</div>';
+      }
+      for (var ni = 0; ni < d._notices.length; ni++) {
+        var nv = d._notices[ni];
+        html += '<div class="notice"><strong>' + esc(nv.type) + '</strong>: ' + esc(nv.text) + '</div>';
       }
       for (var ii2 = 0; ii2 < d._issues.length; ii2++) {
         var iv = d._issues[ii2];
