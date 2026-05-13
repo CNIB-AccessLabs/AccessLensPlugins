@@ -17909,6 +17909,21 @@ function displayAllChecks(allCheckData, elapsedMs) {
         if (r.isEmpty) out.push({ type: "empty-link", text: "Link has no accessible name" });
         else if (r.isUrlAsText) out.push({ type: "url-as-text", text: "Link text is the URL itself (announced character by character)" });
         else if (r.isGeneric) out.push({ type: "generic-link-text", text: 'Generic link text "' + (r.name || "") + '" — describe the destination' });
+        // Cross-link cluster analysis — match displayLinks logic.
+        if (allTopFrameResults && r.nameLower) {
+          var sameName = allTopFrameResults.filter(function (o) { return o !== r && o.nameLower === r.nameLower; });
+          var diffHref = sameName.filter(function (o) { return o.href !== r.href; });
+          if (diffHref.length) {
+            out.push({ type: "ambiguous-link-text", text: 'Same link text "' + (r.name || "") + '" used for different destinations — AT cannot distinguish them' });
+          }
+        }
+        if (allTopFrameResults && r.href && r.href.trim() && r.hrefKind === "http") {
+          var sameHref = allTopFrameResults.filter(function (o) { return o !== r && o.href === r.href; });
+          var diffText = sameHref.filter(function (o) { return o.nameLower !== r.nameLower; });
+          if (diffText.length) {
+            out.push({ type: "inconsistent-link-text", text: "Same destination described with different text in another link — pick one consistent name" });
+          }
+        }
       } else if (checkId === "contrast") {
         if (r.status === "fail-aa") out.push({ type: "contrast-fail-aa", text: "Contrast " + (r.ratio != null ? r.ratio.toFixed(2) + ":1 " : "") + "fails WCAG 1.4.3 AA (required " + (r.requiredAA || "") + ":1)" });
         else if (r.status === "partial-fail") out.push({ type: "contrast-partial-fail", text: "Contrast fails AND text overflows its container" });
