@@ -36,7 +36,9 @@ const CHECKS = {
   lists:     { label: "Lists",            scan: scanLists,     display: displayLists     },
   targetsize:{ label: "Target size",      scan: scanTargetSize, display: displayTargetSize },
   skiplinks: { label: "Skip links",       scan: scanSkipLinks, display: displaySkipLinks  },
-  media:     { label: "Media",            scan: scanMedia,     display: displayMedia     }
+  media:     { label: "Media",            scan: scanMedia,     display: displayMedia     },
+  focusvis:  { label: "Focus visible",    scan: scanFocusVisible, display: displayFocusVisible },
+  reflow:    { label: "Reflow",           scan: scanReflow,    display: displayReflow    }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -13526,6 +13528,1226 @@ function displayMedia(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Media check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: FOCUS VISIBLE — WCAG 2.4.7
+ *
+ * Walks every accessible CSSStyleSheet and collects every rule whose
+ * selector contains :focus, :focus-visible, or :focus-within. Each
+ * rule becomes a panel row. Inventory-first.
+ *
+ * Per-rule classification:
+ *   suppress-only             outline:0/none AND no visible-style change
+ *   suppress-with-replacement outline:0/none AND a replacement style is set
+ *   replacement-only          doesn't touch outline, just adds a style
+ *   no-style-change           :focus rule that doesn't affect visible appearance
+ *
+ * Page-level flags:
+ *   universal-outline-suppressor  bare "* { outline: 0; }" or similar
+ *                                 broad selector outside of :focus rules
+ *   cross-origin-stylesheets-untestable  count of unreadable sheets
+ * ==================================================================== */
+
+function scanFocusVisible() {
+  "use strict";
+  try {
+    var results = [];
+    var pageIssues = [];
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+    var totalSheets = 0;
+    var untestableSheets = 0;
+    var totalRules = 0;
+    var shadowRoots = 0; // not used for stylesheets but kept for shape consistency
+
+    var FOCUS_PSEUDOS = /:focus(?:-visible|-within)?\b/g;
+    // Properties that count as a "replacement" focus indicator when set on :focus.
+    var REPLACEMENT_PROPS = {
+      "box-shadow": 1, "border": 1, "border-color": 1, "border-style": 1, "border-width": 1,
+      "border-top": 1, "border-right": 1, "border-bottom": 1, "border-left": 1,
+      "border-top-color": 1, "border-right-color": 1, "border-bottom-color": 1, "border-left-color": 1,
+      "border-top-style": 1, "border-right-style": 1, "border-bottom-style": 1, "border-left-style": 1,
+      "border-top-width": 1, "border-right-width": 1, "border-bottom-width": 1, "border-left-width": 1,
+      "border-radius": 1,
+      "background": 1, "background-color": 1, "background-image": 1,
+      "color": 1, "text-decoration": 1, "text-decoration-line": 1, "text-decoration-color": 1,
+      "filter": 1, "backdrop-filter": 1, "transform": 1, "opacity": 1,
+      "font-weight": 1, "text-shadow": 1
+    };
+
+    function stripFocusPseudo(selectorText) {
+      // Remove :focus*, but leave the rest of the selector intact.
+      return selectorText.replace(FOCUS_PSEUDOS, "").trim();
+    }
+
+    function isFocusSelector(selectorText) {
+      // Match :focus / :focus-visible / :focus-within as standalone pseudo-classes.
+      // Avoid matching :focusxxxxx that aren't real (defensive).
+      return /:focus(?:-visible|-within)?(?![\w-])/.test(selectorText);
+    }
+
+    function isUniversalIsh(selectorText) {
+      // Selectors that effectively target everything for the outline suppression heuristic.
+      var s = selectorText.trim();
+      if (s === "*") return true;
+      // Match * with any combinator path: "html *", "body *", etc.
+      if (/^(?:html|body)\s+\*$/.test(s)) return true;
+      if (/^\*\s*[>~+]\s*\*$/.test(s)) return true;
+      return false;
+    }
+
+    function declarationDump(style) {
+      // Return cssText-like dump preserving order, including !important markers.
+      var parts = [];
+      for (var i = 0; i < style.length; i++) {
+        var p = style[i];
+        var v = style.getPropertyValue(p);
+        var prio = style.getPropertyPriority(p);
+        parts.push(p + ": " + v + (prio ? " !" + prio : ""));
+      }
+      return parts.join("; ");
+    }
+
+    function ruleSuppressesOutline(style) {
+      // Browser-normalized values are usually used.
+      var outlineStyle = style.getPropertyValue("outline-style");
+      var outlineWidth = style.getPropertyValue("outline-width");
+      var outline = style.getPropertyValue("outline");
+      if (outlineStyle === "none") return true;
+      if (outlineWidth === "0px") return true;
+      if (outline) {
+        // Match "0", "none", "0px", "0 none", "none 0", "0px none", etc.
+        if (/^\s*(?:0|0px|none)(?:\s+(?:0|0px|none))*\s*$/.test(outline)) return true;
+      }
+      return false;
+    }
+
+    function ruleHasReplacement(style) {
+      // Any replacement-property explicitly set in the rule?
+      for (var i = 0; i < style.length; i++) {
+        var p = style[i];
+        if (REPLACEMENT_PROPS[p]) {
+          var v = style.getPropertyValue(p);
+          // box-shadow:none or border-width:0 etc. don't count as replacement
+          if (p === "box-shadow" && (v === "none" || !v.trim())) continue;
+          if (p === "text-decoration" && (v === "none" || v === "auto solid currentcolor")) continue;
+          if (p === "transform" && v === "none") continue;
+          if (p === "filter" && v === "none") continue;
+          if (p === "opacity" && (v === "1" || v === "1.0")) continue;
+          if (/^border/.test(p) && (v === "none" || v === "0px" || v === "0")) continue;
+          if (/^background/.test(p) && (v === "transparent" || v === "rgba(0, 0, 0, 0)" || v === "none")) continue;
+          return true;
+        }
+      }
+      // Also accept an outline rule that explicitly sets a non-zero outline (i.e. provides
+      // its own outline as the focus indicator).
+      var outline = style.getPropertyValue("outline");
+      if (outline && !/^\s*(?:0|0px|none)(?:\s+(?:0|0px|none))*\s*$/.test(outline)) {
+        return true;
+      }
+      var outlineColor = style.getPropertyValue("outline-color");
+      var outlineWidth = style.getPropertyValue("outline-width");
+      var outlineStyle = style.getPropertyValue("outline-style");
+      if (outlineColor && outlineStyle && outlineStyle !== "none" && outlineWidth && outlineWidth !== "0px") {
+        return true;
+      }
+      return false;
+    }
+
+    function classifyRule(style) {
+      var suppresses = ruleSuppressesOutline(style);
+      var replacement = ruleHasReplacement(style);
+      // No declarations -> empty rule
+      if (style.length === 0) return { classification: "no-style-change", suppresses: false, replacement: false };
+      if (suppresses && replacement) return { classification: "suppress-with-replacement", suppresses: true, replacement: true };
+      if (suppresses && !replacement) return { classification: "suppress-only", suppresses: true, replacement: false };
+      if (!suppresses && replacement) return { classification: "replacement-only", suppresses: false, replacement: true };
+      // Some other property — cursor, z-index, etc. — but no visual change.
+      return { classification: "no-style-change", suppresses: false, replacement: false };
+    }
+
+    function sheetSourceLabel(sheet, ruleIndex) {
+      var src = sheet && sheet.href ? sheet.href : "(inline <style>)";
+      return src + " · rule " + ruleIndex;
+    }
+
+    function tryQueryFirst(strippedSelector) {
+      if (!strippedSelector) return null;
+      // Some selectors fail to parse (e.g. due to non-standard pseudos).
+      try {
+        return document.querySelector(strippedSelector);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function tryCountSelector(strippedSelector) {
+      if (!strippedSelector) return 0;
+      try {
+        return document.querySelectorAll(strippedSelector).length;
+      } catch (e) {
+        return -1; // not-parsable
+      }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function walkRules(rules, sheet, sheetUrlLabel, pathPrefix) {
+      if (!rules) return;
+      for (var i = 0; i < rules.length; i++) {
+        var rule = rules[i];
+        if (!rule) continue;
+        totalRules++;
+        var rulePath = pathPrefix + i;
+        // CSSStyleRule
+        if (rule.selectorText && rule.style) {
+          var selText = rule.selectorText;
+          if (isFocusSelector(selText)) {
+            var cls = classifyRule(rule.style);
+            var stripped = stripFocusPseudo(selText);
+            // The stripped selector might contain leading combinators if :focus was attached to a compound. Fix.
+            stripped = stripped.replace(/^\s*[>~+]\s*/, "");
+            // Resolve a representative element for click-to-highlight.
+            var representativeEl = null;
+            // Each selectorText may be a list; try each piece.
+            var pieces = selText.split(",");
+            for (var pi = 0; pi < pieces.length; pi++) {
+              var s = stripFocusPseudo(pieces[pi].trim()).trim();
+              if (s) {
+                representativeEl = tryQueryFirst(s);
+                if (representativeEl) break;
+              }
+            }
+            var count = tryCountSelector(stripped);
+            var entry = {
+              idx: ++idCounter,
+              kind: "focus-rule",
+              selectorText: selText,
+              strippedSelector: stripped,
+              source: sheetUrlLabel,
+              rulePath: rulePath,
+              classification: cls.classification,
+              suppresses: cls.suppresses,
+              hasReplacement: cls.replacement,
+              declarations: declarationDump(rule.style),
+              matchCount: count,
+              issues: [],
+              _resolveSel: representativeEl ? uniqueSelector(representativeEl) : ""
+            };
+            if (cls.classification === "suppress-only") {
+              entry.issues.push({
+                type: "suppress-only",
+                text: "This :focus rule suppresses outline but provides no replacement (no box-shadow, no border change, no background change, no replacement outline). WCAG 2.4.7 violation if it matches any keyboard-focusable element."
+              });
+            } else if (cls.classification === "suppress-with-replacement") {
+              entry.issues.push({
+                type: "suppress-with-replacement-review",
+                text: "Outline is suppressed but a replacement focus style is provided. Verify manually that the replacement is visible: meets ≥3:1 contrast vs adjacent colours (WCAG 1.4.11/2.4.11) and clearly indicates focus."
+              });
+            }
+            results.push(entry);
+          }
+        }
+        // Also check non-focus rules for universal outline suppression.
+        if (rule.selectorText && rule.style && !isFocusSelector(rule.selectorText)) {
+          if (isUniversalIsh(rule.selectorText) && ruleSuppressesOutline(rule.style)) {
+            pageIssues.push({
+              type: "universal-outline-suppressor",
+              text: "Universal selector \"" + rule.selectorText + "\" sets outline:none (or 0). This nukes default focus indicators across the entire page. From " + sheetUrlLabel
+            });
+          }
+        }
+        // CSSMediaRule, CSSSupportsRule, etc. — recurse into nested rules.
+        if (rule.cssRules) {
+          var label = sheetUrlLabel + " > @" + (rule.constructor && rule.constructor.name ? rule.constructor.name.replace(/^CSS|Rule$/g, "") : "nested");
+          try {
+            walkRules(rule.cssRules, sheet, label, rulePath + "/");
+          } catch (e) {
+            // Some nested rules may be inaccessible (e.g. cross-origin @import).
+          }
+        }
+      }
+    }
+
+    function walkSheets(sheets) {
+      for (var i = 0; i < sheets.length; i++) {
+        var sheet = sheets[i];
+        totalSheets++;
+        var sheetUrl = sheet && sheet.href ? sheet.href : "(inline <style>)";
+        var rules;
+        try { rules = sheet.cssRules; } catch (e) {
+          untestableSheets++;
+          continue;
+        }
+        if (!rules) continue;
+        walkRules(rules, sheet, sheetUrl, "");
+      }
+    }
+
+    walkSheets(document.styleSheets);
+    // Also walk stylesheets attached to open shadow roots.
+    var hosts;
+    try { hosts = document.querySelectorAll("*"); } catch (e) { hosts = []; }
+    for (var hi = 0; hi < hosts.length; hi++) {
+      if (hosts[hi].shadowRoot) {
+        shadowRoots++;
+        try {
+          walkSheets(hosts[hi].shadowRoot.styleSheets || []);
+        } catch (e) {}
+      }
+    }
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      pageIssues: pageIssues,
+      totalSheets: totalSheets,
+      untestableSheets: untestableSheets,
+      totalRules: totalRules,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      pageIssues: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayFocusVisible(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var pageIssues = [];
+    var totalSheets = 0, untestableSheets = 0, totalRules = 0, totalShadow = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      totalSheets += (fd.totalSheets || 0);
+      untestableSheets += (fd.untestableSheets || 0);
+      totalRules += (fd.totalRules || 0);
+      totalShadow += (fd.shadowRoots || 0);
+      if (fd.pageIssues) fd.pageIssues.forEach(function (p) { pageIssues.push(p); });
+      if (!fd.results) continue;
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var suppressOnly = 0, suppressRepl = 0, replOnly = 0, noChange = 0, withIssues = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.classification === "suppress-only") suppressOnly++;
+      else if (c.classification === "suppress-with-replacement") suppressRepl++;
+      else if (c.classification === "replacement-only") replOnly++;
+      else if (c.classification === "no-style-change") noChange++;
+      if (c.issues && c.issues.length) withIssues++;
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 540px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.pageissue { background: #fdecec; color: #7a0000; padding: 8px 12px; margin: 0; border-bottom: 1px solid #f3c7c7; font-size: 14px; font-weight: 500; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.fail { background: #b00020; color: #fff; }' +
+      '.chip.warn { background: #d97706; color: #fff; }' +
+      '.chip.ok { background: #1a7f1a; color: #fff; }' +
+      '.chip.info { background: #555; color: #fff; font-weight: 500; }' +
+      '.selector { font-family: ui-monospace, monospace !important; font-size: 13px; color: #003876; font-weight: 600; margin-top: 6px; word-break: break-all; }' +
+      '.declarations { font-family: ui-monospace, monospace !important; font-size: 12px; background: #f4f7ff; padding: 6px 8px; border-radius: 4px; color: #303030; margin-top: 4px; word-break: break-word; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.source { font-family: ui-monospace, monospace !important; font-size: 12px; color: #555; word-break: break-all; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.issue.warn { background: #fff5e1; color: #7a4a00; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-suppressonly li.row:not(.is-suppressonly) { display: none; }' +
+      '.panel.filter-suppressrepl li.row:not(.is-suppressrepl) { display: none; }' +
+      '.panel.filter-replonly li.row:not(.is-replonly) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Focus visible (' + allResults.length + ' :focus rule' + (allResults.length === 1 ? "" : "s") + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      totalSheets + " stylesheet" + (totalSheets === 1 ? "" : "s"),
+      totalRules + " rules scanned",
+      suppressOnly + " suppress-only",
+      suppressRepl ? (suppressRepl + " suppress+replacement") : null,
+      replOnly ? (replOnly + " replacement-only") : null,
+      noChange ? (noChange + " no-style-change") : null,
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    // Page issues
+    for (var pi = 0; pi < pageIssues.length; pi++) {
+      html += '<div class="pageissue">' + esc(pageIssues[pi].text) + '</div>';
+    }
+    if (untestableSheets > 0) {
+      html += '<div class="pageissue" style="background:#fff5e1; color:#7a4a00; border-color:#e6c7a0;">' +
+              esc(untestableSheets + " cross-origin stylesheet" + (untestableSheets === 1 ? "" : "s") +
+              " couldn't be read due to CORS — their :focus rules can't be inspected from script.") + '</div>';
+    }
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="suppressonly">Suppress-only (' + suppressOnly + ')</button>' +
+            '<button data-filter="suppressrepl">Suppress+repl (' + suppressRepl + ')</button>' +
+            '<button data-filter="replonly">Replacement-only (' + replOnly + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.classification === "suppress-only") classes.push("is-suppressonly");
+      else if (t.classification === "suppress-with-replacement") classes.push("is-suppressrepl");
+      else if (t.classification === "replacement-only") classes.push("is-replonly");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      var chipClass = "info", chipLabel = t.classification;
+      if (t.classification === "suppress-only") { chipClass = "fail"; chipLabel = "SUPPRESS-ONLY"; }
+      else if (t.classification === "suppress-with-replacement") { chipClass = "warn"; chipLabel = "SUPPRESS + REPLACEMENT"; }
+      else if (t.classification === "replacement-only") { chipClass = "ok"; chipLabel = "REPLACEMENT-ONLY"; }
+      else if (t.classification === "no-style-change") { chipClass = "info"; chipLabel = "NO VISIBLE CHANGE"; }
+      html += '<span class="chip ' + chipClass + '">' + chipLabel + '</span>';
+
+      var matchStr = t.matchCount >= 0 ? ("~" + t.matchCount + " element" + (t.matchCount === 1 ? "" : "s")) : "selector not parsable";
+      html += '<span class="chip info">' + esc(matchStr) + '</span>';
+      if (t._frameUrl && !t._frameIsTop) html += '<span class="chip info">in frame</span>';
+
+      html += '<div class="selector">' + esc(t.selectorText) + '</div>';
+      html += '<div class="declarations">{ ' + esc(t.declarations) + ' }</div>';
+      html += '<div class="source">source: ' + esc(t.source) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          var ic = t.issues[ji].type === "suppress-with-replacement-review" ? "issue warn" : "issue";
+          html += '<span class="' + ic + '">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 2.4.7 Focus Visible. Limitations: can\'t measure whether replacement indicators meet 2.4.11/1.4.11 contrast without actually focusing the element; cross-origin stylesheets skipped (count in summary); inline style="..." attributes aren\'t inspected (only stylesheet rules); :focus-visible vs :focus distinction is reported per rule but no judgment made.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    // No on-page outlines (the rule applies broadly, not to a specific element).
+
+    // ---- markdown ----
+    var md = "# Focus visible\n\n";
+    md += "Counts: " + suppressOnly + " suppress-only, " + suppressRepl + " suppress+replacement, " + replOnly + " replacement-only, " + noChange + " no-style-change.\n";
+    md += "Scanned " + totalRules + " rules across " + totalSheets + " stylesheets";
+    if (untestableSheets) md += " (" + untestableSheets + " untestable / CORS)";
+    md += ".\n\n";
+    if (pageIssues.length) {
+      md += "**Page issues:**\n";
+      for (var pm = 0; pm < pageIssues.length; pm++) md += "- " + pageIssues[pm].text + "\n";
+      md += "\n";
+    }
+    md += "| # | Class | Selector | Matches | Declarations | Source |\n";
+    md += "|---|-------|----------|---------|--------------|--------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var matchN = mt.matchCount >= 0 ? mt.matchCount : "—";
+      md += "| " + mt.idx +
+            " | " + mt.classification +
+            " | `" + mt.selectorText.replace(/\|/g, "\\|") + "`" +
+            " | " + matchN +
+            " | `" + mt.declarations.replace(/\|/g, "\\|") + "`" +
+            " | " + mt.source.replace(/\|/g, "\\|") + " |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Focus Visible check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: REFLOW — WCAG 1.4.4 Resize Text + 1.4.10 Reflow
+ *
+ * Inspects the page for the static signals that block reflow / resize:
+ *   - <meta name="viewport"> with user-scalable=no or maximum-scale<2
+ *   - overflow:hidden on <html> / <body>
+ *   - elements with computed min-width > 320px
+ *   - elements with computed fixed pixel width > 320px AND no
+ *     responsive max-width
+ *   - elements with font-size < 12px
+ *
+ * Also reports whether the current viewport already has a horizontal
+ * scrollbar (informational — true reflow testing needs resize to 320).
+ * ==================================================================== */
+
+function scanReflow() {
+  "use strict";
+  try {
+    var results = [];
+    var pageIssues = [];
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+    var shadowRoots = 0;
+
+    var THRESHOLD = 320; // CSS px from WCAG 1.4.10
+    var FONT_TOO_SMALL = 12; // CSS px (heuristic)
+    var FIXED_WIDTH_FLAG = 400; // CSS px — only flag fixed widths above this; smaller ones are usually inline things
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function pxFromComputed(value) {
+      // Returns the px count if value is a pixel value, null otherwise.
+      if (!value || value === "auto" || value === "none" || value === "0px") return null;
+      if (/^\d+(?:\.\d+)?px$/.test(value)) return parseFloat(value);
+      return null;
+    }
+
+    // ---- Viewport meta ----
+    var viewportMetas = document.querySelectorAll('meta[name="viewport"]');
+    var viewport = {
+      exists: viewportMetas.length > 0,
+      count: viewportMetas.length,
+      content: viewportMetas.length > 0 ? (viewportMetas[viewportMetas.length - 1].getAttribute("content") || "") : "",
+      userScalable: null,
+      maximumScale: null
+    };
+    if (viewport.content) {
+      // Parse content attribute as comma-separated key=value pairs.
+      var parts = viewport.content.split(/[,;]/);
+      for (var i = 0; i < parts.length; i++) {
+        var kv = parts[i].split("=");
+        var k = kv[0].trim().toLowerCase();
+        var v = (kv[1] || "").trim().toLowerCase();
+        if (k === "user-scalable") viewport.userScalable = v;
+        if (k === "maximum-scale") viewport.maximumScale = parseFloat(v);
+      }
+    }
+
+    if (!viewport.exists) {
+      pageIssues.push({
+        type: "no-viewport-meta",
+        text: 'No <meta name="viewport"> in <head>. Mobile browsers will use the desktop viewport, breaking responsive design. Add <meta name="viewport" content="width=device-width, initial-scale=1">.'
+      });
+    } else {
+      if (viewport.userScalable === "no" || viewport.userScalable === "0") {
+        pageIssues.push({
+          type: "viewport-user-scalable-no",
+          text: 'Viewport meta has user-scalable=' + viewport.userScalable + '. This blocks pinch-zoom on mobile and violates WCAG 1.4.4. Remove user-scalable from the content attribute.'
+        });
+      }
+      if (viewport.maximumScale != null && isFinite(viewport.maximumScale) && viewport.maximumScale < 2) {
+        pageIssues.push({
+          type: "viewport-maximum-scale-limited",
+          text: "Viewport meta has maximum-scale=" + viewport.maximumScale + ". This caps zoom below 200% and violates WCAG 1.4.4 (Resize Text). Remove maximum-scale, or set it ≥ 2."
+        });
+      }
+      if (viewport.count > 1) {
+        pageIssues.push({
+          type: "multiple-viewport-meta",
+          text: viewport.count + ' <meta name="viewport"> tags found. Only one should be present.'
+        });
+      }
+    }
+
+    // ---- Root overflow ----
+    var rootHtmlCS = null, rootBodyCS = null;
+    try { rootHtmlCS = getComputedStyle(document.documentElement); } catch (e) {}
+    try { if (document.body) rootBodyCS = getComputedStyle(document.body); } catch (e) {}
+
+    function rootOverflowFlag(cs, where) {
+      if (!cs) return;
+      var x = cs.overflowX, y = cs.overflowY, all = cs.overflow;
+      if (all === "hidden" || x === "hidden" || y === "hidden") {
+        pageIssues.push({
+          type: "root-overflow-hidden",
+          text: where + " has overflow" +
+            (x === "hidden" ? "-x" : (y === "hidden" ? "-y" : "")) +
+            ":hidden in computed style. This prevents scrolling when the user zooms (WCAG 1.4.10). overflow:clip / overflow-x:hidden on <body> often breaks 200% zoom."
+        });
+      }
+    }
+    rootOverflowFlag(rootHtmlCS, "<html>");
+    rootOverflowFlag(rootBodyCS, "<body>");
+
+    // ---- Current-viewport horizontal overflow ----
+    var pageOverflows = false, viewportWidth = 0, pageWidth = 0;
+    try {
+      viewportWidth = document.documentElement.clientWidth;
+      pageWidth = document.documentElement.scrollWidth;
+      pageOverflows = pageWidth > viewportWidth + 1; // 1px tolerance
+    } catch (e) {}
+    if (pageOverflows) {
+      pageIssues.push({
+        type: "page-overflows-horizontally",
+        text: "Page currently overflows horizontally at this viewport (scrollWidth " + pageWidth + " > clientWidth " + viewportWidth + "). Informational at this viewport size; real 1.4.10 testing requires resize to 320×256."
+      });
+    }
+
+    // ---- Per-element checks ----
+    var seen = 0;
+    function analyseElement(el) {
+      if (isHidden(el)) return;
+      var cs;
+      try { cs = getComputedStyle(el); } catch (e) { return; }
+      if (!cs) return;
+      seen++;
+
+      // min-width
+      var minW = pxFromComputed(cs.minWidth);
+      if (minW != null && minW > THRESHOLD) {
+        results.push({
+          idx: ++idCounter,
+          sel: uniqueSelector(el),
+          tag: el.tagName.toLowerCase(),
+          kind: "min-width",
+          value: cs.minWidth,
+          rawWidth: cs.width,
+          rawMaxWidth: cs.maxWidth,
+          fontSize: cs.fontSize,
+          issues: [{
+            type: "min-width-too-wide",
+            text: "min-width: " + cs.minWidth + " forces this element to be at least that wide. At a 320 CSS px viewport (WCAG 1.4.10) this causes horizontal scrolling."
+          }],
+          _resolveSel: uniqueSelector(el)
+        });
+      }
+
+      // Fixed pixel width with no responsive max-width
+      var w = pxFromComputed(cs.width);
+      var maxW = cs.maxWidth;
+      var maxWPx = pxFromComputed(maxW);
+      // We treat the element as "fixed and not constrained" if:
+      //   width is a > THRESHOLD pixel value, AND
+      //   max-width is either "none" or a pixel value also > THRESHOLD (i.e. no responsive cap)
+      // Percentage/viewport-unit max-widths exempt the element.
+      var maxIsResponsive = (maxW && maxW !== "none" && maxW !== "auto" && !/px$/.test(maxW)); // %, vw, ch, etc.
+      // Skip the document root which often has a pixel width matching clientWidth.
+      if (el !== document.documentElement && el !== document.body &&
+          w != null && w > Math.max(FIXED_WIDTH_FLAG, THRESHOLD) &&
+          !maxIsResponsive && (!maxWPx || maxWPx > THRESHOLD)) {
+        // Only emit if the element actually renders at this fixed width (not eg. inside an iframe smaller than its declared width).
+        var rect;
+        try { rect = el.getBoundingClientRect(); } catch (e) { rect = null; }
+        if (rect && rect.width > THRESHOLD) {
+          results.push({
+            idx: ++idCounter,
+            sel: uniqueSelector(el),
+            tag: el.tagName.toLowerCase(),
+            kind: "fixed-width",
+            value: cs.width,
+            rawWidth: cs.width,
+            rawMaxWidth: cs.maxWidth,
+            fontSize: cs.fontSize,
+            issues: [{
+              type: "fixed-px-width-no-max",
+              text: "width: " + cs.width + " with no responsive max-width (max-width is \"" + maxW + "\"). Will overflow a 320 CSS px viewport (WCAG 1.4.10). Add max-width: 100% or use percentage/viewport units."
+            }],
+            _resolveSel: uniqueSelector(el)
+          });
+        }
+      }
+
+      // Small font sizes — only flag if the element has visible text and isn't an icon/svg.
+      var fs = pxFromComputed(cs.fontSize);
+      if (fs != null && fs > 0 && fs < FONT_TOO_SMALL) {
+        var tagName = el.tagName;
+        if (tagName !== "SVG" && tagName !== "PATH" && txt(el)) {
+          results.push({
+            idx: ++idCounter,
+            sel: uniqueSelector(el),
+            tag: tagName.toLowerCase(),
+            kind: "small-font",
+            value: cs.fontSize,
+            rawWidth: cs.width,
+            rawMaxWidth: cs.maxWidth,
+            fontSize: cs.fontSize,
+            text: txt(el).slice(0, 60),
+            issues: [{
+              type: "px-font-size-small",
+              text: "font-size: " + cs.fontSize + " is below " + FONT_TOO_SMALL + "px. Survives 200% zoom poorly (WCAG 1.4.4). Use relative units (rem/em) and respect user font-size settings."
+            }],
+            _resolveSel: uniqueSelector(el)
+          });
+        }
+      }
+    }
+
+    function walk(root) {
+      if (!root) return;
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var i = 0; i < all.length; i++) {
+        analyseElement(all[i]);
+        if (all[i].shadowRoot) {
+          shadowRoots++;
+          walk(all[i].shadowRoot);
+        }
+      }
+    }
+    walk(document);
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      pageIssues: pageIssues,
+      viewport: viewport,
+      viewportWidth: viewportWidth,
+      pageWidth: pageWidth,
+      pageOverflows: pageOverflows,
+      htmlOverflow: rootHtmlCS ? rootHtmlCS.overflow : "",
+      htmlOverflowX: rootHtmlCS ? rootHtmlCS.overflowX : "",
+      htmlOverflowY: rootHtmlCS ? rootHtmlCS.overflowY : "",
+      bodyOverflow: rootBodyCS ? rootBodyCS.overflow : "",
+      bodyOverflowX: rootBodyCS ? rootBodyCS.overflowX : "",
+      bodyOverflowY: rootBodyCS ? rootBodyCS.overflowY : "",
+      elementsSeen: seen,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      pageIssues: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayReflow(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var allPageIssues = [];
+    var topInfo = null;
+    var totalShadow = 0;
+    var elementsSeen = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      totalShadow += (fd.shadowRoots || 0);
+      elementsSeen += (fd.elementsSeen || 0);
+      if (fd.isTop) topInfo = fd;
+      if (fd.pageIssues) fd.pageIssues.forEach(function (p) { allPageIssues.push(p); });
+      if (!fd.results) continue;
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var minWCount = 0, fixedCount = 0, smallFontCount = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.kind === "min-width") minWCount++;
+      else if (c.kind === "fixed-width") fixedCount++;
+      else if (c.kind === "small-font") smallFontCount++;
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 520px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.pageinfo { padding: 10px 12px; border-bottom: 1px solid #eee; background: #f4f7ff; font-size: 14px; }' +
+      '.pageinfo strong { color: #003876; }' +
+      '.pageinfo code { font-family: ui-monospace, monospace; font-size: 13px; background: #fff; padding: 1px 4px; border-radius: 3px; }' +
+      '.pageissue { background: #fdecec; color: #7a0000; padding: 8px 12px; margin: 0; border-bottom: 1px solid #f3c7c7; font-size: 14px; font-weight: 500; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.minw { background: #b00020; color: #fff; }' +
+      '.chip.fixedw { background: #d97706; color: #fff; }' +
+      '.chip.smallf { background: #6f42c1; color: #fff; }' +
+      '.chip.info { background: #555; color: #fff; font-weight: 500; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.css { font-family: ui-monospace, monospace !important; font-size: 12px; background: #f4f7ff; padding: 4px 8px; border-radius: 4px; color: #303030; margin-top: 4px; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-minw li.row:not(.is-minw) { display: none; }' +
+      '.panel.filter-fixedw li.row:not(.is-fixedw) { display: none; }' +
+      '.panel.filter-smallf li.row:not(.is-smallf) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Reflow (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      elementsSeen + " elements scanned",
+      minWCount + " min-width issues",
+      fixedCount + " fixed-width issues",
+      smallFontCount + " small-font issues"
+    ];
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    // Page-level info banner
+    if (topInfo) {
+      var vp = topInfo.viewport || { exists: false, content: "" };
+      html += '<div class="pageinfo">';
+      html += '<div><strong>Viewport meta:</strong> ' + (vp.exists ? '<code>' + esc(vp.content) + '</code>' : '<em>none</em>') + '</div>';
+      html += '<div><strong>Current viewport:</strong> ' + esc((topInfo.viewportWidth || 0) + " px wide · page width " + (topInfo.pageWidth || 0) + " px" + (topInfo.pageOverflows ? " — overflows" : ""));
+      html += '</div>';
+      html += '<div><strong>&lt;html&gt; overflow:</strong> <code>' + esc(topInfo.htmlOverflow || "(default)") + '</code> · overflow-x: <code>' + esc(topInfo.htmlOverflowX || "") + '</code> · overflow-y: <code>' + esc(topInfo.htmlOverflowY || "") + '</code></div>';
+      html += '<div><strong>&lt;body&gt; overflow:</strong> <code>' + esc(topInfo.bodyOverflow || "(default)") + '</code> · overflow-x: <code>' + esc(topInfo.bodyOverflowX || "") + '</code> · overflow-y: <code>' + esc(topInfo.bodyOverflowY || "") + '</code></div>';
+      html += '</div>';
+    }
+
+    // Page issues
+    for (var pi = 0; pi < allPageIssues.length; pi++) {
+      html += '<div class="pageissue">' + esc(allPageIssues[pi].text) + '</div>';
+    }
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + allResults.length + ')</button>' +
+            '<button data-filter="minw">Min-width (' + minWCount + ')</button>' +
+            '<button data-filter="fixedw">Fixed width (' + fixedCount + ')</button>' +
+            '<button data-filter="smallf">Small text (' + smallFontCount + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row", "has-issue"];
+      if (t.kind === "min-width") classes.push("is-minw");
+      else if (t.kind === "fixed-width") classes.push("is-fixedw");
+      else if (t.kind === "small-font") classes.push("is-smallf");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+      var chipClass = "info", chipLabel = t.kind;
+      if (t.kind === "min-width") { chipClass = "minw"; chipLabel = "MIN-WIDTH"; }
+      else if (t.kind === "fixed-width") { chipClass = "fixedw"; chipLabel = "FIXED WIDTH"; }
+      else if (t.kind === "small-font") { chipClass = "smallf"; chipLabel = "SMALL TEXT"; }
+      html += '<span class="chip ' + chipClass + '">' + chipLabel + '</span>';
+
+      html += '<span style="font-family: ui-monospace, monospace; font-size: 13px; color:#555;">&lt;' + esc(t.tag) + '&gt;</span>';
+
+      var cssBits = [];
+      if (t.kind === "min-width" || t.kind === "fixed-width") {
+        if (t.rawWidth && t.rawWidth !== "auto") cssBits.push("width: " + t.rawWidth);
+        if (t.rawMaxWidth && t.rawMaxWidth !== "none") cssBits.push("max-width: " + t.rawMaxWidth);
+        if (t.kind === "min-width") cssBits.push("min-width: " + t.value);
+      }
+      if (t.kind === "small-font") {
+        cssBits.push("font-size: " + t.value);
+      }
+      if (cssBits.length) html += '<div class="css">' + esc(cssBits.join(" · ")) + '</div>';
+
+      if (t.text) html += '<div class="meta">Text: "' + esc(t.text) + '"</div>';
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 1.4.4 Resize Text · 1.4.10 Reflow. Limitations: real 1.4.10 testing requires resize to 320×256 CSS px; real 1.4.4 testing requires zoom to 200%. We flag the static signals (viewport meta, overflow:hidden on root, min-width &gt; 320, fixed pixel width &gt; 400 with no responsive max-width, small font sizes) that commonly indicate failures. Flex/grid containers and elements whose width is constrained by percentage/vw max-width are not flagged.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = o.kind === "min-width" ? "#b00020" : (o.kind === "fixed-width" ? "#d97706" : "#6f42c1");
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Reflow\n\n";
+    md += "Elements scanned: " + elementsSeen + ". " + minWCount + " min-width issues, " + fixedCount + " fixed-width issues, " + smallFontCount + " small-font issues.\n\n";
+    if (topInfo) {
+      md += "**Viewport meta:** " + (topInfo.viewport.exists ? "`" + topInfo.viewport.content + "`" : "(none)") + "\n";
+      md += "**Current viewport:** " + (topInfo.viewportWidth || 0) + " px wide, page width " + (topInfo.pageWidth || 0) + " px" + (topInfo.pageOverflows ? " (overflows)" : "") + "\n\n";
+    }
+    if (allPageIssues.length) {
+      md += "**Page issues:**\n";
+      for (var pm = 0; pm < allPageIssues.length; pm++) md += "- " + allPageIssues[pm].text + "\n";
+      md += "\n";
+    }
+    md += "| # | Kind | Tag | Value | Selector | Issue |\n";
+    md += "|---|------|-----|-------|----------|-------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var issueStr = mt.issues && mt.issues.length ? mt.issues[0].type : "";
+      md += "| " + mt.idx +
+            " | " + mt.kind +
+            " | " + mt.tag +
+            " | " + mt.value +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "`" +
+            " | " + issueStr + " |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Reflow check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}

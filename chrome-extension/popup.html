@@ -115,6 +115,18 @@
       </button>
       <p class="desc">WCAG 1.2.1–1.2.5, 1.4.2 Audio Control, 2.2.2 Pause Stop Hide. Inventories &lt;video&gt;, &lt;audio&gt;, and third-party player iframes (YouTube, Vimeo, Wistia, Dailymotion, Twitch, Loom, Vidyard, SoundCloud, Spotify). Flags missing controls, autoplay (especially autoplay+loop), &lt;video&gt; with no &lt;track kind="captions"/"subtitles"&gt; children, caption tracks present without a default, missing poster, missing transcript link nearby (heuristic), embed iframes with autoplay parameters in their URL, and embed iframes with no title/aria-label. Limitations: custom JS-driven controls/captions invisible to static inspection; we can't tell whether captions or transcripts are accurate; media duration unknown so the 1.4.2 "under 3 seconds" exception isn't applied.</p>
     </li>
+    <li>
+      <button class="check" data-check="focusvis">
+        <span class="label">Focus visible</span>
+      </button>
+      <p class="desc">WCAG 2.4.7 Focus Visible. Walks every accessible CSSStyleSheet and inventories every rule whose selector contains :focus, :focus-visible, or :focus-within. Classifies each rule as suppress-only (outline:0/none with no replacement — WCAG violation), suppress-with-replacement (manual contrast review needed), replacement-only (safe), or no-style-change. Also flags universal outline suppressors (* { outline: 0 } and similar) and reports cross-origin stylesheets that can't be inspected. Limitations: can't measure replacement-indicator contrast without focusing; cross-origin stylesheets skipped; inline style="..." attributes not inspected.</p>
+    </li>
+    <li>
+      <button class="check" data-check="reflow">
+        <span class="label">Reflow</span>
+      </button>
+      <p class="desc">WCAG 1.4.4 Resize Text and 1.4.10 Reflow. Page-level: viewport meta presence and validity (flags user-scalable=no, maximum-scale&lt;2), overflow:hidden on &lt;html&gt;/&lt;body&gt;, current-viewport horizontal overflow. Per-element: elements with computed min-width &gt; 320px (force horizontal scrolling at the 1.4.10 minimum viewport), elements with computed fixed pixel width &gt; 400px AND no responsive max-width, elements with font-size &lt; 12px (survive 200% zoom poorly). Limitations: real 1.4.10 testing requires actual resize to 320×256; real 1.4.4 testing requires zoom to 200%. Flex/grid containers and elements with percentage/vw max-widths aren't flagged.</p>
+    </li>
   </ul>
 </section>
 <footer>
