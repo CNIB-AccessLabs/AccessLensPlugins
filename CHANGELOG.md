@@ -34,6 +34,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **non-interactive** — element has tabindex but no native interactive role and no interactive ARIA role; verify keyboard handlers (Enter/Space) are wired up.
   - **interactive-skipped** — natively interactive element has `tabindex="-1"`; deliberately removed from the tab order, worth a second look.
   - **invalid-value** — tabindex attribute is not a parseable integer.
+- **Buttons & interactive check.** WCAG 2.1.1 Keyboard, 4.1.2 Name/Role/Value, 3.3.1/3.3.2. Inventories every native `<button>`, every `<input type="button|submit|reset|image">`, every `<a>`, every element with an interactive ARIA role (`button`, `link`, `menuitem`, `tab`, `option`, `checkbox`, `radio`, `switch`, `treeitem`, …), and every non-interactive element carrying inline interaction handlers (`onclick`/`onmousedown`/`onmouseup`/`onpointerdown`/`onpointerup`) or button-toggle ARIA state attributes (`aria-pressed`/`aria-expanded`/`aria-haspopup`). Each row shows element + type chip, role, accessible name, href/handler source, tabindex, dimensions, disabled state, and unique selector.
+  - **button-no-type-in-form** — `<button>` inside `<form>` without explicit `type=`. Defaults to `submit`, which causes accidental submission on Enter.
+  - **button-type-reset** — `<button type="reset">` / `<input type="reset">`. Reset buttons routinely surprise users by clearing already-typed data without warning.
+  - **link-as-button** — `<a href="#">` or `<a href="javascript:…">`. Looks like a link to AT and to the URL bar but is acting as a button.
+  - **link-no-href** — `<a>` with no `href`. Not focusable, not a link.
+  - **link-disabled-attr** — `<a disabled>`. The `disabled` attribute has no effect on `<a>`.
+  - **inline-handler-on-link** — `<a href>` with `onclick` containing `preventDefault` or `return false`. The link goes nowhere; should be a button.
+  - **div-onclick-no-role** — `<div>`/`<span>` (or any non-interactive element) with an inline click handler attribute and no role and no tabindex. Keyboard-unreachable.
+  - **role-without-tabindex** — interactive ARIA role on a non-focusable host without `tabindex`. Element is not keyboard-reachable; add `tabindex="0"`.
+  - **role-without-key-handler** — interactive role + inline `onclick` attribute but no inline `onkeydown`/`onkeyup`/`onkeypress`. Heuristic only — handlers wired via `addEventListener` are invisible to static inspection, so this is flagged as "verify keyboard handlers wired."
+  - **aria-pressed-without-button-role** — `aria-pressed` on an element whose effective role isn't `button`.
+  - **aria-expanded-bad-role** — `aria-expanded` on an element whose role doesn't support it (not in `button`/`link`/`combobox`/`tab`/`menuitem`/`treeitem`/`gridcell`/`row(header)`/`listbox`/`application`/`switch`).
+  - **haspopup-without-expanded** — `aria-haspopup` set but no `aria-expanded`. The popup's open/closed state isn't exposed to AT.
+  - Filter bar: All / Issues / Buttons / Links / Clickable-div / Toggles.
+  - **Limitation note in the panel footer**: event handlers attached via `addEventListener` are not inspectable from script — `role-without-key-handler` and `div-onclick-no-role` flag only the inline-attribute cases.
 - **Iframes check.** WCAG 2.4.1 Bypass Blocks and 4.1.2 Name, Role, Value. Inventories every `<iframe>` (and deprecated `<frame>`/`<frameset>`) across the top document and every nested frame the scanner can reach (the content script runs in each frame via `allFrames: true`, so each frame finds its own iframe children and they're stitched together in the panel). Per row: tag, origin chip (SAME-ORIGIN / CROSS-ORIGIN / UNKNOWN), hidden chip when applicable, accessible name with its source (aria-labelledby / aria-label / title), dimensions, tabindex, role, sandbox token chips, truncated `src` (or `srcdoc:` preview), and unique selector. Outline matches issue state on the page.
   - **missing-name** — no `title`, no `aria-label`, no `aria-labelledby` (SR users navigate frames by name; without one there's nothing to announce).
   - **empty-name** — attribute is present but resolves to empty (`title=""`, `aria-label=""`, or `aria-labelledby` pointing at missing/empty IDs). Often worse than no name because some tools register it as labeled.

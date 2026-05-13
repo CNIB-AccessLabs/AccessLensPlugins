@@ -20,7 +20,8 @@ const CHECK_LABELS = {
   tabindex: "Tabindex & Focus Order",
   forms: "Forms",
   tables: "Tables",
-  iframes: "Iframes"
+  iframes: "Iframes",
+  buttons: "Buttons & interactive"
 };
 
 async function getActiveTab() {

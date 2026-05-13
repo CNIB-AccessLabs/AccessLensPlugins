@@ -31,7 +31,8 @@ const CHECKS = {
   tabindex:  { label: "Tabindex & Focus Order", scan: scanTabindex, display: displayTabindex },
   forms:     { label: "Forms",            scan: scanForms,     display: displayForms     },
   tables:    { label: "Tables",           scan: scanTables,    display: displayTables    },
-  iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   }
+  iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   },
+  buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -9040,6 +9041,24 @@ function displayTables(framesData, checkId) {
     panelEl.innerHTML = html;
     shadow.appendChild(panelEl);
 
+    // Click a row to scroll the element into view and flash it.
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
     // Outline top-frame tables.
     for (var oi = 0; oi < allResults.length; oi++) {
       var o = allResults[oi];
@@ -9781,6 +9800,24 @@ function displayIframes(framesData, checkId) {
     panelEl.innerHTML = html;
     shadow.appendChild(panelEl);
 
+    // Click a row to scroll the element into view and flash it.
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
     // Outline top-frame iframes.
     for (var oi = 0; oi < allResults.length; oi++) {
       var o = allResults[oi];
@@ -9902,6 +9939,768 @@ function displayIframes(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Iframes check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: BUTTONS — interactive-semantics inspector
+ *
+ * WCAG 2.1.1 Keyboard, 4.1.2 Name/Role/Value, 1.3.1 Info/Relationships,
+ * 3.3.1/3.3.2 (button type defaults inside forms).
+ *
+ * Every native <button>, every <a>, every interactive-role element, and
+ * every non-interactive element carrying an inline interaction handler
+ * (onclick/onmousedown/onkeydown/onkeypress) is inventoried. The check
+ * focuses on the *interaction semantics* angle: is the right element
+ * used, is the right keyboard story in place, is the right state
+ * exposed.
+ *
+ * Per-element flags:
+ *   button-no-type-in-form       <button> in <form> without type=; defaults to submit
+ *   button-type-reset            <button type="reset">
+ *   link-as-button               <a href="#"> or href="javascript:..."
+ *   link-no-href                 <a> without href (not focusable, not a link)
+ *   link-disabled-attr           <a disabled> (disabled has no effect on <a>)
+ *   inline-handler-on-link       <a href> with onclick containing preventDefault/return false
+ *   div-onclick-no-role          non-interactive element with onclick and no role / tabindex
+ *   role-without-tabindex        interactive ARIA role on non-focusable host, no tabindex
+ *   role-without-key-handler     interactive role + onclick but no onkey*= attribute (heuristic)
+ *   aria-pressed-without-button-role   aria-pressed on element that isn't a button
+ *   aria-expanded-bad-role       aria-expanded on element whose role doesn't support it
+ *   haspopup-without-expanded    aria-haspopup without aria-expanded
+ * ==================================================================== */
+
+function scanButtons() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+
+    var INTERACTIVE_ARIA_ROLES = {
+      button: 1, link: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1,
+      tab: 1, option: 1, checkbox: 1, radio: 1, switch: 1, treeitem: 1,
+      gridcell: 1, slider: 1, spinbutton: 1, combobox: 1, listbox: 1
+    };
+    // Roles for which aria-expanded is in the supported-states list.
+    var ROLES_SUPPORTING_EXPANDED = {
+      button: 1, link: 1, combobox: 1, tab: 1, menuitem: 1, menuitemcheckbox: 1,
+      menuitemradio: 1, treeitem: 1, gridcell: 1, rowheader: 1, columnheader: 1,
+      listbox: 1, application: 1, "switch": 1, row: 1
+    };
+    // Natively focusable + interactive HTML elements (subset relevant here).
+    var NATIVE_INTERACTIVE_TAGS = {
+      BUTTON: 1, A: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1, SUMMARY: 1, DETAILS: 1,
+      AUDIO: 1, VIDEO: 1, IFRAME: 1, OBJECT: 1, EMBED: 1
+    };
+    // Handler attribute names to look at.
+    var CLICK_ATTRS = ["onclick", "onmousedown", "onmouseup", "onpointerdown", "onpointerup"];
+    var KEY_ATTRS = ["onkeydown", "onkeyup", "onkeypress"];
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function computeAccName(el) {
+      // Tiny accessible-name resolver — full computation is in the Names check.
+      var alb = el.getAttribute && el.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return joined;
+      }
+      var al = el.getAttribute && el.getAttribute("aria-label");
+      if (al && al.trim()) return al.trim();
+      var t = txt(el);
+      if (t) return t;
+      // <input type=submit/reset/button>: value attr
+      if (el.tagName === "INPUT") {
+        var v = el.getAttribute("value");
+        if (v && v.trim()) return v.trim();
+        // type=image: alt
+        var alt = el.getAttribute("alt");
+        if (alt && alt.trim()) return alt.trim();
+      }
+      var ti = el.getAttribute && el.getAttribute("title");
+      if (ti && ti.trim()) return ti.trim();
+      return "";
+    }
+
+    function isFormAncestor(el) {
+      for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+        if (n.tagName === "FORM") return n;
+      }
+      return null;
+    }
+
+    function inlineHandlersOn(el) {
+      var out = [];
+      for (var i = 0; i < CLICK_ATTRS.length; i++) {
+        if (el.hasAttribute && el.hasAttribute(CLICK_ATTRS[i])) out.push(CLICK_ATTRS[i]);
+      }
+      return out;
+    }
+
+    function hasKeyHandlerAttr(el) {
+      for (var i = 0; i < KEY_ATTRS.length; i++) {
+        if (el.hasAttribute && el.hasAttribute(KEY_ATTRS[i])) return KEY_ATTRS[i];
+      }
+      return "";
+    }
+
+    function isNativelyInteractive(el) {
+      if (!el || !el.tagName) return false;
+      if (!NATIVE_INTERACTIVE_TAGS[el.tagName]) return false;
+      if (el.tagName === "A") return el.hasAttribute("href");
+      if (el.tagName === "INPUT") {
+        var type = (el.getAttribute("type") || "text").toLowerCase();
+        return type !== "hidden";
+      }
+      if (el.tagName === "AUDIO" || el.tagName === "VIDEO") return el.hasAttribute("controls");
+      return true;
+    }
+
+    function classify(el, role) {
+      var tag = el.tagName;
+      if (tag === "BUTTON") return "button";
+      if (tag === "INPUT") {
+        var type = (el.getAttribute("type") || "text").toLowerCase();
+        if (type === "submit" || type === "button" || type === "reset" || type === "image") return "button";
+      }
+      if (tag === "A") return "link";
+      if (role === "button") return "aria-button";
+      if (role === "link") return "aria-link";
+      if (role) return "role-" + role;
+      // Has handler but no role -> clickable-div
+      return "clickable";
+    }
+
+    function analyse(el) {
+      var roleAttr = (el.getAttribute && el.getAttribute("role")) || "";
+      var role = roleAttr.trim().toLowerCase();
+      // Pick first valid role token only.
+      if (role.indexOf(" ") !== -1) role = role.split(/\s+/)[0];
+
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: el.tagName.toLowerCase(),
+        roleAttr: roleAttr,
+        role: role,
+        type: (el.tagName === "BUTTON" || el.tagName === "INPUT") ? (el.getAttribute("type") || "").toLowerCase() : "",
+        href: el.tagName === "A" ? el.getAttribute("href") : null,
+        hasHrefAttr: el.tagName === "A" ? el.hasAttribute("href") : false,
+        accName: computeAccName(el),
+        tabindexRaw: el.getAttribute("tabindex"),
+        tabindex: null,
+        ariaPressed: el.getAttribute("aria-pressed"),
+        ariaExpanded: el.getAttribute("aria-expanded"),
+        ariaHaspopup: el.getAttribute("aria-haspopup"),
+        ariaDisabled: el.getAttribute("aria-disabled") === "true",
+        disabledAttr: el.hasAttribute("disabled"),
+        inlineHandlers: inlineHandlersOn(el),
+        keyHandlerAttr: hasKeyHandlerAttr(el),
+        formAncestor: !!isFormAncestor(el),
+        width: 0,
+        height: 0,
+        hidden: isHidden(el),
+        issues: [],
+        _resolveSel: ""
+      };
+      entry._resolveSel = entry.sel;
+      if (entry.tabindexRaw != null) {
+        var n = parseInt(entry.tabindexRaw, 10);
+        if (isFinite(n) && String(n) === entry.tabindexRaw.trim()) entry.tabindex = n;
+      }
+      try {
+        var rect = el.getBoundingClientRect();
+        entry.width = Math.round(rect.width);
+        entry.height = Math.round(rect.height);
+      } catch (e) {}
+
+      entry.category = classify(el, role);
+
+      // Effective role for downstream checks (used by aria-* state validation).
+      var effectiveRole = role;
+      if (!effectiveRole) {
+        if (entry.tag === "button") effectiveRole = "button";
+        else if (entry.tag === "input") {
+          if (entry.type === "submit" || entry.type === "button" || entry.type === "reset" || entry.type === "image") effectiveRole = "button";
+          else if (entry.type === "checkbox") effectiveRole = "checkbox";
+          else if (entry.type === "radio") effectiveRole = "radio";
+        }
+        else if (entry.tag === "a" && entry.hasHrefAttr) effectiveRole = "link";
+        else if (entry.tag === "summary") effectiveRole = "button";
+      }
+      entry.effectiveRole = effectiveRole;
+
+      // ---- per-element checks ----
+
+      // 1. <button> in <form> without explicit type=
+      if (entry.tag === "button" && entry.formAncestor && !el.hasAttribute("type")) {
+        entry.issues.push({
+          type: "button-no-type-in-form",
+          text: "<button> inside <form> with no explicit type= — defaults to submit, which can cause accidental form submission on Enter or click."
+        });
+      }
+
+      // 2. type="reset"
+      if (entry.tag === "button" && entry.type === "reset") {
+        entry.issues.push({
+          type: "button-type-reset",
+          text: "<button type=\"reset\"> — reset buttons routinely surprise users by clearing form data without warning. Review whether it's actually needed."
+        });
+      }
+      if (entry.tag === "input" && entry.type === "reset") {
+        entry.issues.push({
+          type: "button-type-reset",
+          text: "<input type=\"reset\"> — reset buttons routinely surprise users by clearing form data without warning. Review whether it's actually needed."
+        });
+      }
+
+      // 3. <a href="#"> or javascript: pseudo-protocol
+      if (entry.tag === "a" && entry.hasHrefAttr) {
+        var h = (entry.href || "").trim();
+        if (h === "#" || h === "" || /^javascript:/i.test(h)) {
+          entry.issues.push({
+            type: "link-as-button",
+            text: "<a href=\"" + (h || "") + "\"> — link points nowhere; this is acting as a button. Use <button type=\"button\"> with appropriate styling."
+          });
+        }
+      }
+
+      // 4. <a> with no href
+      if (entry.tag === "a" && !entry.hasHrefAttr) {
+        entry.issues.push({
+          type: "link-no-href",
+          text: "<a> without href is not focusable and not a link. Either add href, or use <button>/<span> with appropriate role."
+        });
+      }
+
+      // 5. <a disabled> — disabled has no effect on <a>
+      if (entry.tag === "a" && entry.disabledAttr) {
+        entry.issues.push({
+          type: "link-disabled-attr",
+          text: "<a disabled> — the disabled attribute has no effect on <a>. Use aria-disabled=\"true\" plus tabindex=\"-1\" plus event prevention if disabling intent."
+        });
+      }
+
+      // 6. inline-handler-on-link
+      if (entry.tag === "a" && entry.hasHrefAttr && entry.inlineHandlers.length > 0) {
+        var onclickAttr = el.getAttribute("onclick") || "";
+        if (/preventDefault|return\s+false/i.test(onclickAttr)) {
+          entry.issues.push({
+            type: "inline-handler-on-link",
+            text: "<a href=\"" + (entry.href || "") + "\"> with onclick that prevents default — the href is decorative; this is acting as a button."
+          });
+        }
+      }
+
+      // 7. div-onclick-no-role — non-interactive element with handler but no role/tabindex
+      if (entry.inlineHandlers.length > 0 &&
+          !isNativelyInteractive(el) &&
+          !role &&
+          entry.tabindex == null) {
+        entry.issues.push({
+          type: "div-onclick-no-role",
+          text: "<" + entry.tag + "> has " + entry.inlineHandlers.join("/") + " but no role and no tabindex — keyboard users can't reach this element."
+        });
+      }
+
+      // 8. role-without-tabindex — interactive role on non-focusable host
+      if (role && INTERACTIVE_ARIA_ROLES[role] && !isNativelyInteractive(el) && entry.tabindex == null) {
+        entry.issues.push({
+          type: "role-without-tabindex",
+          text: "role=\"" + role + "\" on <" + entry.tag + "> but no tabindex — element is not keyboard-reachable. Add tabindex=\"0\"."
+        });
+      }
+
+      // 9. role-without-key-handler — has interactive role + onclick attr, but no onkey* attr
+      if (role && INTERACTIVE_ARIA_ROLES[role] && !isNativelyInteractive(el) &&
+          entry.inlineHandlers.length > 0 && !entry.keyHandlerAttr) {
+        entry.issues.push({
+          type: "role-without-key-handler",
+          text: "role=\"" + role + "\" with " + entry.inlineHandlers.join("/") + " but no inline onkeydown/onkeyup/onkeypress attribute. If keyboard handlers are wired via addEventListener that's fine — this is a heuristic flag for manual review."
+        });
+      }
+
+      // 10. aria-pressed only meaningful on buttons
+      if (entry.ariaPressed != null && entry.effectiveRole !== "button") {
+        entry.issues.push({
+          type: "aria-pressed-without-button-role",
+          text: "aria-pressed=\"" + entry.ariaPressed + "\" on element whose role is \"" + (entry.effectiveRole || "(none)") + "\" — aria-pressed is only meaningful on role=\"button\" (or native <button>)."
+        });
+      }
+
+      // 11. aria-expanded only meaningful on certain roles
+      if (entry.ariaExpanded != null) {
+        var r = entry.effectiveRole;
+        if (!r || !ROLES_SUPPORTING_EXPANDED[r]) {
+          entry.issues.push({
+            type: "aria-expanded-bad-role",
+            text: "aria-expanded=\"" + entry.ariaExpanded + "\" on element whose role is \"" + (r || "(none)") + "\" — aria-expanded is only defined on button/link/combobox/tab/menuitem/treeitem/gridcell/row(header)/listbox/application/switch."
+          });
+        }
+      }
+
+      // 12. aria-haspopup without aria-expanded
+      if (entry.ariaHaspopup && entry.ariaHaspopup !== "false" && entry.ariaExpanded == null) {
+        entry.issues.push({
+          type: "haspopup-without-expanded",
+          text: "aria-haspopup=\"" + entry.ariaHaspopup + "\" without aria-expanded — the popup's current open/closed state isn't exposed to AT."
+        });
+      }
+
+      return entry;
+    }
+
+    function shouldInclude(el) {
+      if (!el || el.nodeType !== 1) return false;
+      var tag = el.tagName;
+      if (tag === "BUTTON") return true;
+      if (tag === "A") return true;
+      if (tag === "INPUT") {
+        var t = (el.getAttribute("type") || "").toLowerCase();
+        if (t === "submit" || t === "button" || t === "reset" || t === "image") return true;
+        return false;
+      }
+      if (tag === "SUMMARY") return true;
+      // Has explicit role of interest.
+      var role = (el.getAttribute("role") || "").trim().toLowerCase();
+      if (role && INTERACTIVE_ARIA_ROLES[role.split(/\s+/)[0]]) return true;
+      // Has inline interaction handler.
+      for (var i = 0; i < CLICK_ATTRS.length; i++) {
+        if (el.hasAttribute(CLICK_ATTRS[i])) return true;
+      }
+      // Has aria-pressed / aria-expanded / aria-haspopup (i.e. claims to be a button-like).
+      if (el.hasAttribute("aria-pressed")) return true;
+      if (el.hasAttribute("aria-expanded")) return true;
+      return false;
+    }
+
+    function walk(root) {
+      if (!root) return;
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (shouldInclude(el)) results.push(analyse(el));
+        if (el.shadowRoot) {
+          shadowRoots++;
+          walk(el.shadowRoot);
+        }
+      }
+    }
+
+    walk(document);
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayButtons(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    // Resolve elements in the top frame.
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var nativeBtn = 0, nativeLink = 0, ariaBtn = 0, ariaOther = 0, clickable = 0, toggles = 0, withIssues = 0, hiddenCount = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.hidden) hiddenCount++;
+      if (c.issues && c.issues.length) withIssues++;
+      if (c.ariaPressed != null || c.ariaExpanded != null || c.ariaHaspopup) toggles++;
+      if (c.tag === "button" || (c.tag === "input" && (c.type === "submit" || c.type === "button" || c.type === "reset" || c.type === "image"))) nativeBtn++;
+      else if (c.tag === "a") nativeLink++;
+      else if (c.role === "button") ariaBtn++;
+      else if (c.role && c.role !== "link") ariaOther++;
+      else clickable++;
+    }
+
+    // ---- on-page panel ----
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 520px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.btn { background: #1a7f1a; color: #fff; }' +
+      '.chip.link { background: #6f42c1; color: #fff; }' +
+      '.chip.aria { background: #d97706; color: #fff; }' +
+      '.chip.clickable { background: #b00020; color: #fff; }' +
+      '.chip.toggle { background: #003876; color: #fff; }' +
+      '.chip.hidden { background: #707070; color: #fff; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.name.missing { color: #b00020; font-style: italic; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.attr { font-family: ui-monospace, monospace !important; font-size: 12px; color: #555; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-buttons li.row:not(.is-button) { display: none; }' +
+      '.panel.filter-links li.row:not(.is-link) { display: none; }' +
+      '.panel.filter-clickable li.row:not(.is-clickable) { display: none; }' +
+      '.panel.filter-toggles li.row:not(.is-toggle) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Buttons &amp; interactive (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      nativeBtn + " button",
+      nativeLink + " link",
+      ariaBtn ? (ariaBtn + " role=button") : null,
+      ariaOther ? (ariaOther + " other role") : null,
+      clickable ? (clickable + " clickable (no role)") : null,
+      toggles ? (toggles + " toggle/popup") : null,
+      hiddenCount ? (hiddenCount + " hidden") : null,
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="buttons">Buttons (' + (nativeBtn + ariaBtn) + ')</button>' +
+            '<button data-filter="links">Links (' + nativeLink + ')</button>' +
+            '<button data-filter="clickable">Clickable-div (' + clickable + ')</button>' +
+            '<button data-filter="toggles">Toggles (' + toggles + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      // Type classes for filters
+      var isButton = (t.tag === "button" ||
+                      (t.tag === "input" && (t.type === "submit" || t.type === "button" || t.type === "reset" || t.type === "image")) ||
+                      t.role === "button");
+      var isLink = (t.tag === "a" || t.role === "link");
+      var isClickable = (!t.role && t.inlineHandlers && t.inlineHandlers.length > 0 &&
+                        t.tag !== "button" && t.tag !== "a" && t.tag !== "input");
+      var isToggle = (t.ariaPressed != null || t.ariaExpanded != null || t.ariaHaspopup);
+      if (isButton) classes.push("is-button");
+      if (isLink) classes.push("is-link");
+      if (isClickable) classes.push("is-clickable");
+      if (isToggle) classes.push("is-toggle");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      // Type chip(s)
+      if (t.tag === "button") {
+        html += '<span class="chip btn">&lt;button&gt;' + (t.type ? ' type="' + esc(t.type) + '"' : '') + '</span>';
+      } else if (t.tag === "input") {
+        html += '<span class="chip btn">&lt;input type="' + esc(t.type) + '"&gt;</span>';
+      } else if (t.tag === "a") {
+        html += '<span class="chip link">&lt;a' + (t.hasHrefAttr ? ' href' : '') + '&gt;</span>';
+      } else if (t.role) {
+        html += '<span class="chip aria">&lt;' + esc(t.tag) + ' role="' + esc(t.role) + '"&gt;</span>';
+      } else {
+        html += '<span class="chip clickable">&lt;' + esc(t.tag) + '&gt;</span>';
+      }
+
+      if (isToggle) {
+        var togBits = [];
+        if (t.ariaPressed != null) togBits.push("aria-pressed=" + t.ariaPressed);
+        if (t.ariaExpanded != null) togBits.push("aria-expanded=" + t.ariaExpanded);
+        if (t.ariaHaspopup) togBits.push("aria-haspopup=" + t.ariaHaspopup);
+        html += '<span class="chip toggle">' + esc(togBits.join(" ")) + '</span>';
+      }
+      if (t.hidden) html += '<span class="chip hidden">HIDDEN</span>';
+
+      if (t.accName) {
+        html += '<span class="name">' + esc(t.accName.length > 60 ? t.accName.slice(0, 60) + "…" : t.accName) + '</span>';
+      } else {
+        html += '<span class="name missing">(no accessible name)</span>';
+      }
+
+      var metaParts = [];
+      if (t.tag === "a" && t.hasHrefAttr) metaParts.push("href=" + (t.href || "").slice(0, 60));
+      if (t.tabindexRaw != null) metaParts.push("tabindex=" + t.tabindexRaw);
+      if (t.inlineHandlers && t.inlineHandlers.length) metaParts.push("inline: " + t.inlineHandlers.join(", "));
+      if (t.keyHandlerAttr) metaParts.push("key: " + t.keyHandlerAttr);
+      if (t.disabledAttr) metaParts.push("disabled");
+      if (t.ariaDisabled) metaParts.push("aria-disabled");
+      metaParts.push(t.width + "×" + t.height + " px");
+      if (t._frameUrl && !t._frameIsTop) metaParts.push("in frame");
+      html += '<div class="meta">' + esc(metaParts.join(" · ")) + '</div>';
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 2.1.1 Keyboard · 4.1.2 Name/Role/Value · 3.3.1/3.3.2 (button type defaults). Heuristic limitations: handlers attached via addEventListener are invisible to static inspection.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    // Click a row to scroll the element into view and flash it.
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    // Outline top-frame elements.
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = (o.issues && o.issues.length) ? "#b00020" : "#003876";
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Buttons & interactive\n\n";
+    md += "Counts: " + nativeBtn + " <button>/<input>, " + nativeLink + " <a>";
+    if (ariaBtn) md += ", " + ariaBtn + " role=button";
+    if (ariaOther) md += ", " + ariaOther + " other role";
+    if (clickable) md += ", " + clickable + " clickable-no-role";
+    md += ", " + withIssues + " with issues.\n\n";
+    md += "| # | Element | Role | Name | href / handler | tabindex | Issues | Selector |\n";
+    md += "|---|---------|------|------|----------------|----------|--------|----------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var elDesc = "<" + mt.tag;
+      if (mt.type) elDesc += " type=" + mt.type;
+      if (mt.hasHrefAttr && mt.tag === "a") elDesc += " href";
+      elDesc += ">";
+      var roleStr = mt.role || (mt.effectiveRole !== mt.tag ? mt.effectiveRole : "");
+      var name = mt.accName ? mt.accName.replace(/\|/g, "\\|") : "";
+      var handler = (mt.tag === "a" && mt.hasHrefAttr) ? mt.href : (mt.inlineHandlers ? mt.inlineHandlers.join(",") : "");
+      handler = (handler || "").replace(/\|/g, "\\|");
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | " + elDesc.replace(/\|/g, "\\|") +
+            " | " + (roleStr || "") +
+            " | " + name +
+            " | " + (handler.length > 60 ? handler.slice(0, 60) + "…" : handler) +
+            " | " + (mt.tabindexRaw == null ? "" : mt.tabindexRaw) +
+            " | " + issueStr +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "` |\n";
+    }
+
+    // ---- filter bar ----
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    // ---- drag ----
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Buttons check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}
