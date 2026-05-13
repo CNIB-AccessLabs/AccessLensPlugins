@@ -17758,10 +17758,12 @@ function displayAllChecks(allCheckData, elapsedMs) {
       '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
       '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
       '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
-      'details.check { border-bottom: 1px solid #eee; }' +
+      'details.check { border-bottom: 4px solid #003876; }' +
+      'details.check:last-of-type { border-bottom: none; }' +
       'details.check[open] { background: #f9fbff; }' +
       'details.check.has-issue summary { background: #fdecec; color: #7a0000; }' +
-      'details.check summary { padding: 8px 12px; cursor: pointer; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }' +
+      'details.check summary { padding: 12px 14px; cursor: pointer; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; border-top: 1px solid #cfd6e0; }' +
+      'details.check:first-of-type summary { border-top: none; }' +
       'details.check summary .count { font-weight: 500; color: #555; margin-left: auto; font-size: 13px; }' +
       'details.check.has-issue summary .count { color: #7a0000; }' +
       'details.check .body { padding: 4px 12px 12px; }' +
