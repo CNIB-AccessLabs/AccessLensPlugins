@@ -6,9 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [1.1.0] — 2026-05-12
 
-### CSV export + "Run all" master panel
+### Export to MD/CSV + "Run all" master panel
 
-- **Copy CSV** button added to every per-check panel alongside the existing Copy MD button. The CSV is auto-derived from the panel's pipe-separated MD table at click time — same data, different format.
+- **Download MD** and **Download CSV** buttons added to every panel (per-check and master). Per-check panels also retired the older Copy MD button — files now save to the user's Downloads folder instead of going to the clipboard, which keeps the header uncluttered with four exports per panel reduced to two.
+- Per-check filenames are scoped by check so you can save multiple without overwriting: `accesslens-{checkId}-{hostname}-{YYYY-MM-DD-HHMM}.{md,csv}`. The master panel writes `accesslens-{hostname}-{YYYY-MM-DD-HHMM}.{md,csv}`.
+- **CSV format per check:** flat rows derived from the existing per-check MD table — same columns, CSV-escaped, ready for Excel/Numbers/Sheets.
 - **Run all 21 checks & export** button added at the top of the popup. Runs every check sequentially across all frames, then opens a master panel summarising every check's findings.
 - **Master panel:** collapsible per-check sections (auto-open for checks with issues, collapsed for clean ones), inline issue list per section, "Open this check on its own" button to drill into any one check.
 - **Combined Markdown export** — single `# CNIB AccessLens — All Checks` document with one `## Check Name` section per check, each containing a count summary plus an issues table.

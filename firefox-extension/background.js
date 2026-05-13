@@ -552,7 +552,7 @@ function displayNames(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Accessible Names (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -656,28 +656,40 @@ function displayNames(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -1129,7 +1141,7 @@ function displayHeadings(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Headings (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="visible">Visible only (' + visibleResults.length + ')</button>' +
@@ -1279,28 +1291,40 @@ function displayHeadings(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -1837,7 +1861,7 @@ function displayLandmarks(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Landmarks (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="landmarks">Landmarks (' + landmarkCount + ')</button>' +
@@ -1981,28 +2005,40 @@ function displayLandmarks(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -2500,7 +2536,7 @@ function displayImages(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Images (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -2631,28 +2667,40 @@ function displayImages(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -3197,7 +3245,7 @@ function displayLinks(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Links (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="summary">' + summary + "</div>" +
     '<ol id="' + P + 'list"></ol>';
 
@@ -3316,28 +3364,40 @@ function displayLinks(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -4160,7 +4220,7 @@ function displayAria(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>ARIA Usage (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="issues">Issues (' + issueRowCount + ')</button>' +
@@ -4312,28 +4372,40 @@ function displayAria(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -5063,7 +5135,7 @@ function displayContrast(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Contrast (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="fail">Fail (' + failCount + ')</button>' +
@@ -5199,28 +5271,40 @@ function displayContrast(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -6049,7 +6133,7 @@ function displayDocument(framesData, checkId) {
   panelEl.className = "panel filter-all";
   panelEl.innerHTML =
     "<header><strong>Title &amp; Language (" + findings.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + findings.length + ')</button>' +
       '<button data-filter="issues">Issues (' + totalIssues + ')</button>' +
@@ -6397,28 +6481,40 @@ function displayDocument(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -7060,7 +7156,7 @@ function displayTabindex(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Tabindex &amp; Focus Order (" + allResults.length + ")</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
       '<button data-filter="issues">Issues (' + totalIssues + ')</button>' +
@@ -7276,28 +7372,40 @@ function displayTabindex(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -8476,7 +8584,7 @@ function displayForms(framesData, checkId) {
 
   panelEl.innerHTML =
     "<header><strong>Forms (" + allControls.length + " ctrl / " + allForms.length + " form)</strong>" +
-    '<div class="btns"><button id="' + P + 'csv">Copy CSV</button><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="btns"><button id="' + P + 'dl_md">Download MD</button><button id="' + P + 'dl_csv">Download CSV</button><button id="' + P + 'close">Close</button></div></header>' +
     '<div class="filterbar">' +
       '<button data-filter="all" class="active">All (' + allControls.length + ')</button>' +
       '<button data-filter="issues">Issues (' + issueCount + ')</button>' +
@@ -8699,28 +8807,40 @@ function displayForms(framesData, checkId) {
     return out.join("\n");
   }
   var csv = mdTableToCsv(md);
+  function downloadFile_(content, ext, mime) {
+    try {
+      var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+               pad(d.getHours()) + pad(d.getMinutes());
+      var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+      return true;
+    } catch (e) { return false; }
+  }
 
-  panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
-    
-  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+  panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
     var btn = e.currentTarget;
-    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-    }
+    var ok = downloadFile_(md, "md", "text/markdown");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
   });
+  panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var ok = downloadFile_(csv, "csv", "text/csv");
+    btn.textContent = ok ? "Downloaded!" : "Download failed";
+    setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+  });
+
+
+    
 
   window[P + "active"] = checkId;
   window[P + "cleanup"] = function () {
@@ -9402,8 +9522,8 @@ function displayTables(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Tables (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -9617,28 +9737,40 @@ function displayTables(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -10183,8 +10315,8 @@ function displayIframes(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Iframes (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [];
@@ -10423,28 +10555,40 @@ function displayIframes(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -10989,8 +11133,8 @@ function displayButtons(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Buttons &amp; interactive (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -11225,28 +11369,40 @@ function displayButtons(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -11881,8 +12037,8 @@ function displayLists(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Lists (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -12088,28 +12244,40 @@ function displayLists(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -12529,8 +12697,8 @@ function displayTargetSize(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Target size (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -12727,28 +12895,40 @@ function displayTargetSize(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -13195,8 +13375,8 @@ function displaySkipLinks(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Skip links</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -13413,28 +13593,40 @@ function displaySkipLinks(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -13986,8 +14178,8 @@ function displayMedia(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Media (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -14206,28 +14398,40 @@ function displayMedia(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -14671,8 +14875,8 @@ function displayFocusVisible(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Focus visible (' + allResults.length + ' :focus rule' + (allResults.length === 1 ? "" : "s") + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -14863,28 +15067,40 @@ function displayFocusVisible(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -15297,8 +15513,8 @@ function displayReflow(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Reflow (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -15506,28 +15722,40 @@ function displayReflow(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -16200,8 +16428,8 @@ function displayNonTextContrast(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Non-text contrast (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -16423,28 +16651,40 @@ function displayNonTextContrast(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -17058,8 +17298,8 @@ function displayAnimation(framesData, checkId) {
 
     var html = "";
     html += '<header><strong>Animation (' + allResults.length + ')</strong>' +
-            '<button id="' + P + 'csv">Copy CSV</button>' +
-            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'dl_md">Download MD</button>' +
+            '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button></header>';
 
     var summaryBits = [
@@ -17290,28 +17530,40 @@ function displayAnimation(framesData, checkId) {
       return out.join("\n");
     }
     var csv = mdTableToCsv(md);
+    function downloadFile_(content, ext, mime) {
+      try {
+        var blob = new Blob([content], { type: mime + ";charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var d = new Date(), pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var ts = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" +
+                 pad(d.getHours()) + pad(d.getMinutes());
+        var hostname = location.hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "accesslens-" + checkId + "-" + hostname + "-" + ts + "." + ext;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (e) {} }, 100);
+        return true;
+      } catch (e) { return false; }
+    }
 
-    panelEl.querySelector("#" + P + "csv").addEventListener("click", function (e) {
+    panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) {
       var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy CSV"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = csv; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
+      var ok = downloadFile_(md, "md", "text/markdown");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download MD"; }, 1400);
     });
+    panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var ok = downloadFile_(csv, "csv", "text/csv");
+      btn.textContent = ok ? "Downloaded!" : "Download failed";
+      setTimeout(function () { btn.textContent = "Download CSV"; }, 1400);
+    });
+
+
     
-    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
-      var btn = e.currentTarget;
-      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
-      } else {
-        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
-      }
-    });
 
     window[P + "active"] = checkId;
     window[P + "cleanup"] = function () {
@@ -17534,8 +17786,6 @@ function displayAllChecks(allCheckData, elapsedMs) {
     var html = "";
     html += '<header>' +
             '<strong>CNIB AccessLens — All Checks</strong>' +
-            '<button id="' + P + 'copy_md">Copy MD</button>' +
-            '<button id="' + P + 'copy_csv">Copy CSV</button>' +
             '<button id="' + P + 'dl_md">Download MD</button>' +
             '<button id="' + P + 'dl_csv">Download CSV</button>' +
             '<button id="' + P + 'close">Close</button>' +
@@ -17626,8 +17876,6 @@ function displayAllChecks(allCheckData, elapsedMs) {
       return "accesslens-" + host + "-" + timestamp() + "." + ext;
     }
 
-    panelEl.querySelector("#" + P + "copy_md").addEventListener("click", function (e) { copyText(md, e.currentTarget, "Copy MD"); });
-    panelEl.querySelector("#" + P + "copy_csv").addEventListener("click", function (e) { copyText(csv, e.currentTarget, "Copy CSV"); });
     panelEl.querySelector("#" + P + "dl_md").addEventListener("click", function (e) { downloadBlob(md, filename("md"), "text/markdown", e.currentTarget, "Download MD"); });
     panelEl.querySelector("#" + P + "dl_csv").addEventListener("click", function (e) { downloadBlob(csv, filename("csv"), "text/csv", e.currentTarget, "Download CSV"); });
     panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
