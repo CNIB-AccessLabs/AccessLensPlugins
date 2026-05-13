@@ -17,127 +17,127 @@
       <button class="check" data-check="names">
         <span class="label">Accessible Names</span>
       </button>
-      <p class="desc">Reports the computed accessible name of every interactive element.</p>
-    </li>
-    <li>
-      <button class="check" data-check="headings">
-        <span class="label">Headings</span>
-      </button>
-      <p class="desc">Heading tree: levels, numbers, skipped levels, empty headings, multiple h1, role="heading" issues.</p>
-    </li>
-    <li>
-      <button class="check" data-check="landmarks">
-        <span class="label">Landmarks</span>
-      </button>
-      <p class="desc">Page-region landmarks (banner, nav, main, complementary, contentinfo, region, search, form) with names. Flags multiple main, unnamed regions, and same-role landmarks needing distinct names.</p>
-    </li>
-    <li>
-      <button class="check" data-check="images">
-        <span class="label">Images</span>
-      </button>
-      <p class="desc">All image-like elements (img, svg, role="img", input type="image", area) classified as labeled, decorative, missing alt, or suspicious alt (filename-looking, generic single word, redundant "image of …" prefix).</p>
-    </li>
-    <li>
-      <button class="check" data-check="links">
-        <span class="label">Link Text</span>
-      </button>
-      <p class="desc">Link text quality per WCAG 2.4.4 / 2.4.9. Flags empty links, generic phrases ("click here", "read more"), URL-as-text, and cross-link clusters where the same text points to different destinations or vice versa.</p>
-    </li>
-    <li>
-      <button class="check" data-check="aria">
-        <span class="label">ARIA Validation</span>
-      </button>
-      <p class="desc">Validates every role and aria-* attribute on the page. Flags unknown role values, abstract roles, unknown aria-* names (with "did you mean" suggestions), broken aria-labelledby/describedby/controls/owns ID refs, invalid boolean values, missing required attributes per role, and role="presentation"/"none" on focusable elements.</p>
-    </li>
-    <li>
-      <button class="check" data-check="contrast">
-        <span class="label">Colour Contrast</span>
-      </button>
-      <p class="desc">Text colour vs background contrast against WCAG 1.4.3 AA (4.5:1 normal, 3:1 large). Composites semi-transparent backgrounds, detects gradients/images/animations/overflow/z-index stacking and surfaces them as caveats. Cannot-calculate cases flagged for manual review. Limitations vs auto_a11y are listed in the panel.</p>
-    </li>
-    <li>
-      <button class="check" data-check="document">
-        <span class="label">Title &amp; Language</span>
-      </button>
-      <p class="desc">WCAG 2.4.2 (Page Titled), 3.1.1 (Language of Page), 3.1.2 (Language of Parts). Page title presence/quality, full inventory of every lang and xml:lang attribute with BCP 47 structural + case-canonical + value validation (region affects screen-reader dialect), lang/xml:lang cross-element mismatch detection, hreflang validation on links, URL-language-hint detection on foreign links, and the "lang= embedded in alt/aria-label" smell check.</p>
-    </li>
-    <li>
-      <button class="check" data-check="tabindex">
-        <span class="label">Tabindex &amp; Focus Order</span>
-      </button>
-      <p class="desc">WCAG 2.4.3 (Focus Order). Full inventory of focusable elements with both their DOM position and the order the browser will actually traverse. Flags positive tabindex (anti-pattern), duplicate positive values, tabindex on non-interactive elements without an interactive role, invalid values, and natively-interactive elements deliberately removed via tabindex="-1". Sort by DOM order or focus order to see where they diverge.</p>
-    </li>
-    <li>
-      <button class="check" data-check="forms">
-        <span class="label">Forms</span>
-      </button>
-      <p class="desc">WCAG 1.3.1, 1.3.5, 3.3.1, 3.3.2, 4.1.2. Inventory of every form control grouped by &lt;form&gt;. Flags unlabeled controls, placeholder-as-label, wrapping &lt;label&gt;…&lt;input&gt;&lt;/label&gt; (breaks Dragon NaturallySpeaking), labels not left-aligned above their input (hard to find at high magnification), multiple controls on the same horizontal line (also a magnifier problem), missing visible required indicator, required attribute used where aria-required is correct, broken aria-describedby/labelledby ID refs, missing or invalid autocomplete on personal-data fields, radio/checkbox groups not wrapped in fieldset, empty legends, image inputs without alt, aria-disabled on focusable controls, forms with no submit, and forms relying on native browser bubble validation (bubbles auto-dismiss and are unusable at high zoom).</p>
-    </li>
-    <li>
-      <button class="check" data-check="tables">
-        <span class="label">Tables</span>
-      </button>
-      <p class="desc">WCAG 1.3.1. Every &lt;table&gt; classified data / layout-declared / ambiguous. Data tables flagged when they lack a caption/aria-label, have no &lt;th&gt;, mix complex headers without scope=, or have spanned cells without explicit headers= wiring. Layout tables flagged when they carry data signals (caption, summary=, aria-label) or when role="presentation"/"none" contradicts the data semantics on the same table. Also flags multiple captions, caption not as the first child, obsolete summary= attribute, nested tables, invalid scope values, empty &lt;th&gt;, broken headers= ID refs, and "looks-like-data-but-no-&lt;th&gt;" (first row visually styled as a header).</p>
-    </li>
-    <li>
-      <button class="check" data-check="iframes">
-        <span class="label">Iframes</span>
-      </button>
-      <p class="desc">WCAG 2.4.1, 4.1.2. Inventory of every &lt;iframe&gt; (plus deprecated &lt;frame&gt;/&lt;frameset&gt;) across the top document and all nested frames. Flags missing/empty title, generic frame names ("iframe", "frame", "embedded content", "frame N"), names that just repeat the src URL/hostname/filename, duplicate names across frames, tabindex="-1" on visible iframes (removes the embedded doc from tab order), positive tabindex, aria-hidden="true" on substantial-sized iframes with content (focusable-but-hidden trap), tiny/off-screen iframes without aria-hidden (analytics pixels), role="presentation"/"none" on iframes with content, and empty iframes (no src, no srcdoc). Same-origin vs cross-origin marked per row.</p>
-    </li>
-    <li>
-      <button class="check" data-check="buttons">
-        <span class="label">Buttons &amp; interactive</span>
-      </button>
-      <p class="desc">WCAG 2.1.1, 4.1.2, 3.3.1/3.3.2. Inventory of every &lt;button&gt;, every &lt;a&gt;, every interactive-role element, and every non-interactive element with inline interaction handlers. Flags &lt;button&gt; inside &lt;form&gt; without explicit type= (defaults to submit), type="reset" (rarely what the user wants), &lt;a href="#"&gt; / href="javascript:" used as buttons, &lt;a&gt; without href, &lt;a disabled&gt; (no effect on links), &lt;a href&gt; with onclick that preventDefault's, &lt;div&gt;/&lt;span&gt; with onclick and no role/tabindex (keyboard-unreachable), interactive ARIA role on non-focusable host with no tabindex, interactive role + onclick but no inline onkey* (heuristic), aria-pressed on non-button, aria-expanded on roles that don't support it, and aria-haspopup without aria-expanded (popup state not exposed). Note: handlers wired via addEventListener can't be statically inspected.</p>
-    </li>
-    <li>
-      <button class="check" data-check="lists">
-        <span class="label">Lists</span>
-      </button>
-      <p class="desc">WCAG 1.3.1. Inventory of every &lt;ul&gt;, &lt;ol&gt;, &lt;menu&gt;, &lt;dl&gt;, and every [role="list"] container, plus orphan &lt;li&gt;/&lt;dt&gt;/&lt;dd&gt;/[role="listitem"]. Flags non-&lt;li&gt; direct children of &lt;ul&gt;/&lt;ol&gt;, orphan &lt;li&gt;, empty lists, empty list items, &lt;ul&gt;/&lt;ol&gt; with list-style:none and no role="list" (Safari/VoiceOver quirk that strips list semantics), role="presentation"/"none" on natural lists (intentional strip; flagged informationally), [role="list"] without role="listitem" children, orphan role="listitem", &lt;dl&gt; with bad direct children, and broken dt/dd pairing (dt with no dd, dd with no dt).</p>
-    </li>
-    <li>
-      <button class="check" data-check="targetsize">
-        <span class="label">Target size</span>
-      </button>
-      <p class="desc">WCAG 2.5.8 Target Size (Minimum, AA · 24×24 CSS px) and 2.5.5 Target Size (Enhanced, AAA · 44×44 CSS px). Measures every interactive element's bounding rect. Classifies each as pass, fail-AA, fail-AA-spacing-ok (undersized but the 24-px spacing exception applies), fail-AAA-only (passes AA but not AAA), or inline-link (in-flow-text exception). Hidden / disabled / zero-size elements are excluded per spec. Caveats listed in the panel: measured at current rendered size; rotation/transforms use bounding rect; "equivalent control" and "user-agent" exceptions can't be detected.</p>
-    </li>
-    <li>
-      <button class="check" data-check="skiplinks">
-        <span class="label">Skip links</span>
-      </button>
-      <p class="desc">WCAG 2.4.1 Bypass Blocks. Walks the first 10 focusable elements in DOM order and identifies skip-link candidates: same-page anchors (&lt;a href="#id"&gt;) whose text matches /skip|jump|to main|to content/i OR whose target resolves to &lt;main&gt;, &lt;h1&gt;, [role="main"], or a landmark. For each candidate, validates the target exists, is a main-content anchor, and is focusable (non-interactive targets need tabindex="-1" or focus won't land). Page-level flags: no-skip-link, skip-link-not-first. Limitation: can't actually focus the link to test "visually-hidden-until-focus" CSS — only the current rendered state is observed.</p>
-    </li>
-    <li>
-      <button class="check" data-check="media">
-        <span class="label">Media</span>
-      </button>
-      <p class="desc">WCAG 1.2.1–1.2.5, 1.4.2 Audio Control, 2.2.2 Pause Stop Hide. Inventories &lt;video&gt;, &lt;audio&gt;, and third-party player iframes (YouTube, Vimeo, Wistia, Dailymotion, Twitch, Loom, Vidyard, SoundCloud, Spotify). Flags missing controls, autoplay (especially autoplay+loop), &lt;video&gt; with no &lt;track kind="captions"/"subtitles"&gt; children, caption tracks present without a default, missing poster, missing transcript link nearby (heuristic), embed iframes with autoplay parameters in their URL, and embed iframes with no title/aria-label. Limitations: custom JS-driven controls/captions invisible to static inspection; we can't tell whether captions or transcripts are accurate; media duration unknown so the 1.4.2 "under 3 seconds" exception isn't applied.</p>
-    </li>
-    <li>
-      <button class="check" data-check="focusvis">
-        <span class="label">Focus visible</span>
-      </button>
-      <p class="desc">WCAG 2.4.7 Focus Visible. Walks every accessible CSSStyleSheet and inventories every rule whose selector contains :focus, :focus-visible, or :focus-within. Classifies each rule as suppress-only (outline:0/none with no replacement — WCAG violation), suppress-with-replacement (manual contrast review needed), replacement-only (safe), or no-style-change. Also flags universal outline suppressors (* { outline: 0 } and similar) and reports cross-origin stylesheets that can't be inspected. Limitations: can't measure replacement-indicator contrast without focusing; cross-origin stylesheets skipped; inline style="..." attributes not inspected.</p>
-    </li>
-    <li>
-      <button class="check" data-check="reflow">
-        <span class="label">Reflow</span>
-      </button>
-      <p class="desc">WCAG 1.4.4 Resize Text and 1.4.10 Reflow. Page-level: viewport meta presence and validity (flags user-scalable=no, maximum-scale&lt;2), overflow:hidden on &lt;html&gt;/&lt;body&gt;, current-viewport horizontal overflow. Per-element: elements with computed min-width &gt; 320px (force horizontal scrolling at the 1.4.10 minimum viewport), elements with computed fixed pixel width &gt; 400px AND no responsive max-width, elements with font-size &lt; 12px (survive 200% zoom poorly). Limitations: real 1.4.10 testing requires actual resize to 320×256; real 1.4.4 testing requires zoom to 200%. Flex/grid containers and elements with percentage/vw max-widths aren't flagged.</p>
-    </li>
-    <li>
-      <button class="check" data-check="nontext">
-        <span class="label">Non-text contrast</span>
-      </button>
-      <p class="desc">WCAG 1.4.11 Non-text Contrast and 2.4.7 Focus Visible. Programmatically focuses each interactive element (preventScroll), reads computed focus styles, measures focus-indicator-vs-background contrast, then blurs. Original focus + scroll restored at end. Rule families match auto_a11y (CNIB-AccessLabs) conventions: Input* / Button* / Link* / Tabindex* / Handler*. Statuses: pass (≥3:1), focus-contrast-fail, transparent-outline (alpha &lt;0.5), gradient-bg / image-bg / parent-gradient / parent-image / z-index-floating (cannot verify), no-focus-indicator. Uses Porter-Duff source-over compositing for transparent backgrounds.</p>
+      <p class="desc">Reports the computed accessible name of every interactive element (per W3C AccName 1.2). Flags elements with no name, and notes when the name comes from a placeholder only — not a spec accname.</p>
     </li>
     <li>
       <button class="check" data-check="animation">
         <span class="label">Animation</span>
       </button>
-      <p class="desc">WCAG 2.2.2 Pause Stop Hide, 2.3.1 Three Flashes, 2.3.3 Animation from Interactions. Inventories every CSS animation rule across all accessible stylesheets, matches each to its @keyframes body, and inspects for: ErrInfiniteAnimation (infinite iteration on a non-spinner), WarnInfiniteAnimationLikelySpinner (same on a spinner — class/role/size heuristic downgrades to warning), WarnLongAnimation (duration &gt; 5s, including long transition-durations), WarnProblematicAnimation (keyframes contain flash opacity / shake translate / fast rotate patterns), ErrNoReducedMotionSupport (animations exist but no @media (prefers-reduced-motion) anywhere). Also flags obsolete &lt;marquee&gt; and &lt;blink&gt; elements and animated-GIF candidates (img src=*.gif). Rule prefixes follow auto_a11y conventions. Limitations: JS-driven animations and carousels are invisible to static inspection.</p>
+      <p class="desc">WCAG 2.2.2, 2.3.1, 2.3.3. Inventories every CSS animation and matches each to its @keyframes body. Flags infinite iteration (spinner-heuristic downgrade), duration &gt; 5s, problematic keyframe patterns (flash, shake, fast rotate), missing @media (prefers-reduced-motion), &lt;marquee&gt;/&lt;blink&gt;, and animated-GIF candidates.</p>
+    </li>
+    <li>
+      <button class="check" data-check="aria">
+        <span class="label">ARIA Validation</span>
+      </button>
+      <p class="desc">Validates every role and aria-* attribute. Flags unknown roles, abstract roles, unknown aria-* names (with "did you mean" suggestions), broken aria-labelledby/describedby/controls/owns ID refs, invalid boolean values, missing required attributes per role, and role="presentation"/"none" on focusable elements.</p>
+    </li>
+    <li>
+      <button class="check" data-check="buttons">
+        <span class="label">Buttons &amp; interactive</span>
+      </button>
+      <p class="desc">WCAG 2.1.1, 4.1.2, 3.3.1/3.3.2. Inventories every &lt;button&gt;, &lt;a&gt;, interactive-role element, and non-interactive element with inline handlers. Flags &lt;button&gt; without explicit type= inside a form, &lt;a href="#"&gt; used as buttons, &lt;a&gt; without href, div/span onclick without role/tabindex, and inconsistent aria-pressed/expanded/haspopup states.</p>
+    </li>
+    <li>
+      <button class="check" data-check="contrast">
+        <span class="label">Colour Contrast</span>
+      </button>
+      <p class="desc">Text vs background contrast against WCAG 1.4.3 AA (4.5:1 normal, 3:1 large), with AAA status also reported. Composites semi-transparent backgrounds via Porter-Duff. Flags gradients, background images, animations, and z-index stacking as caveats. Cannot-calculate cases listed for manual review.</p>
+    </li>
+    <li>
+      <button class="check" data-check="focusvis">
+        <span class="label">Focus visible</span>
+      </button>
+      <p class="desc">WCAG 2.4.7 Focus Visible. Walks every accessible stylesheet and inventories every :focus / :focus-visible / :focus-within rule. Classifies each as suppress-only (outline removed with no replacement — fail), suppress-with-replacement (manual contrast review), replacement-only (safe), or no-style-change. Also flags universal outline:0 resets.</p>
+    </li>
+    <li>
+      <button class="check" data-check="forms">
+        <span class="label">Forms</span>
+      </button>
+      <p class="desc">WCAG 1.3.1, 1.3.5, 3.3.1, 3.3.2, 4.1.2. Form controls grouped by &lt;form&gt;. Flags unlabeled controls, placeholder-as-label, wrapping &lt;label&gt; (breaks Dragon), poor label position for magnifier users, missing required indicator, required vs aria-required confusion, broken ID refs, missing autocomplete, and forms relying on native browser bubble validation.</p>
+    </li>
+    <li>
+      <button class="check" data-check="headings">
+        <span class="label">Headings</span>
+      </button>
+      <p class="desc">Heading tree of every &lt;h1&gt;–&lt;h6&gt; and [role="heading"] element, including hidden and sr-only ones. Flags empty headings, skipped levels, multiple &lt;h1&gt;, role="heading" without aria-level, and aria-level out of the 1–6 range.</p>
+    </li>
+    <li>
+      <button class="check" data-check="iframes">
+        <span class="label">Iframes</span>
+      </button>
+      <p class="desc">WCAG 2.4.1, 4.1.2. Inventory of every &lt;iframe&gt; (plus obsolete &lt;frame&gt;/&lt;frameset&gt;) across the top document and all nested frames. Flags missing/empty title, generic frame names, names that just repeat the src URL, duplicate names, tabindex="-1" on visible iframes, and aria-hidden over substantial content.</p>
+    </li>
+    <li>
+      <button class="check" data-check="images">
+        <span class="label">Images</span>
+      </button>
+      <p class="desc">Every image-like element (&lt;img&gt;, &lt;svg role="img"&gt;, &lt;input type="image"&gt;, &lt;area&gt;) classified as labeled, decorative, missing alt, or suspicious alt (filename-looking, generic single word, redundant "image of …" prefix). Shows raw alt alongside computed accessible name.</p>
+    </li>
+    <li>
+      <button class="check" data-check="landmarks">
+        <span class="label">Landmarks</span>
+      </button>
+      <p class="desc">Page-region landmarks (banner, navigation, main, complementary, contentinfo, region, search, form) from HTML5 sectioning and explicit role= attributes. Flags multiple &lt;main&gt;, role="region" without name, and same-role landmarks needing distinct names. Non-qualifying candidates listed for review.</p>
+    </li>
+    <li>
+      <button class="check" data-check="links">
+        <span class="label">Link Text</span>
+      </button>
+      <p class="desc">Every &lt;a href&gt; and [role="link"] classified per WCAG 2.4.4 / 2.4.9. Flags empty links, generic phrases ("click here", "read more"), URL-as-text, and cross-link clusters (same text pointing to different destinations, or same destination with different texts).</p>
+    </li>
+    <li>
+      <button class="check" data-check="lists">
+        <span class="label">Lists</span>
+      </button>
+      <p class="desc">WCAG 1.3.1. Every &lt;ul&gt;, &lt;ol&gt;, &lt;menu&gt;, &lt;dl&gt;, and [role="list"] container plus orphan items. Flags non-&lt;li&gt; children of &lt;ul&gt;/&lt;ol&gt;, orphan &lt;li&gt;, empty lists/items, list-style:none without role="list" (Safari/VoiceOver quirk), role="presentation" on natural lists, and broken &lt;dt&gt;/&lt;dd&gt; pairing.</p>
+    </li>
+    <li>
+      <button class="check" data-check="media">
+        <span class="label">Media</span>
+      </button>
+      <p class="desc">WCAG 1.2.1–1.2.5, 1.4.2, 2.2.2. Inventories &lt;video&gt;, &lt;audio&gt;, and third-party player iframes (YouTube, Vimeo, Wistia, etc.). Flags missing controls, autoplay (and autoplay+loop), missing captions, captions present without default, missing transcript nearby (heuristic), and embed URLs with autoplay parameters.</p>
+    </li>
+    <li>
+      <button class="check" data-check="nontext">
+        <span class="label">Non-text contrast</span>
+      </button>
+      <p class="desc">WCAG 1.4.11 / 2.4.7. Programmatically focuses each interactive element, reads computed focus styles, measures focus-indicator-vs-background contrast, then restores focus and scroll. Rule families: Input / Button / Link / Tabindex / Handler. Statuses: pass, fail (&lt; 3:1), transparent-outline, gradient/image background (cannot verify), no-focus-indicator.</p>
+    </li>
+    <li>
+      <button class="check" data-check="reflow">
+        <span class="label">Reflow</span>
+      </button>
+      <p class="desc">WCAG 1.4.4 Resize Text and 1.4.10 Reflow. Page-level: viewport meta validity (user-scalable, maximum-scale), overflow:hidden on &lt;html&gt;/&lt;body&gt;, current horizontal overflow. Per-element: min-width &gt; 320px, fixed pixel width &gt; 400px without responsive max-width, font-size &lt; 12px. Real reflow testing still requires resize to 320×256.</p>
+    </li>
+    <li>
+      <button class="check" data-check="skiplinks">
+        <span class="label">Skip links</span>
+      </button>
+      <p class="desc">WCAG 2.4.1 Bypass Blocks. Inspects the first 10 focusable elements; flags same-page anchors matching /skip|jump|to main/i or pointing at &lt;main&gt;/&lt;h1&gt;/landmarks. Validates each candidate's target exists, is a main-content anchor, and is focusable (non-interactive targets need tabindex="-1"). Page-level flags: no-skip-link, skip-link-not-first.</p>
+    </li>
+    <li>
+      <button class="check" data-check="tabindex">
+        <span class="label">Tabindex &amp; Focus Order</span>
+      </button>
+      <p class="desc">WCAG 2.4.3 Focus Order. Inventories every focusable element with both its DOM position and the order the browser will actually traverse. Flags positive tabindex (anti-pattern), duplicate positive values, tabindex on non-interactive elements without a role, invalid values, and natively-interactive elements with tabindex="-1". Sort by DOM or focus order.</p>
+    </li>
+    <li>
+      <button class="check" data-check="tables">
+        <span class="label">Tables</span>
+      </button>
+      <p class="desc">WCAG 1.3.1. Every &lt;table&gt; classified data / layout-declared / ambiguous. Flags data tables without caption/aria-label or without &lt;th&gt;, complex headers missing scope=, spanned cells lacking explicit headers= wiring, multiple captions, obsolete summary= attribute, nested tables, and "looks-like-data-but-no-&lt;th&gt;" (bold first row used as visual headers).</p>
+    </li>
+    <li>
+      <button class="check" data-check="targetsize">
+        <span class="label">Target size</span>
+      </button>
+      <p class="desc">WCAG 2.5.8 (AA, 24×24 CSS px) and 2.5.5 (AAA, 44×44 CSS px). Measures every interactive element's bounding rect. Classifies pass, fail-AA, fail-AA-spacing-ok (undersized but spacing exception applies), fail-AAA-only, or inline-link (in-flow-text exception). Hidden, disabled, and zero-size elements are excluded per spec.</p>
+    </li>
+    <li>
+      <button class="check" data-check="document">
+        <span class="label">Title &amp; Language</span>
+      </button>
+      <p class="desc">WCAG 2.4.2 (Page Titled), 3.1.1 (Language of Page), 3.1.2 (Language of Parts). Page title presence and quality, full inventory of every lang and xml:lang attribute with BCP 47 validation, hreflang validation on links, URL-language-hint detection on foreign links, and the "lang= embedded in alt/aria-label" smell check.</p>
     </li>
   </ul>
 </section>

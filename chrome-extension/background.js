@@ -20,27 +20,27 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
 
 const CHECKS = {
-  names:     { label: "Accessible Names", scan: scanNames,     display: displayNames     },
-  headings:  { label: "Headings",         scan: scanHeadings,  display: displayHeadings  },
-  landmarks: { label: "Landmarks",        scan: scanLandmarks, display: displayLandmarks },
-  images:    { label: "Images",           scan: scanImages,    display: displayImages    },
-  links:     { label: "Link Text",        scan: scanLinks,     display: displayLinks     },
-  aria:      { label: "ARIA Validation",  scan: scanAria,      display: displayAria      },
-  contrast:  { label: "Colour Contrast",  scan: scanContrast,  display: displayContrast  },
-  document:  { label: "Title & Language", scan: scanDocument,  display: displayDocument  },
-  tabindex:  { label: "Tabindex & Focus Order", scan: scanTabindex, display: displayTabindex },
-  forms:     { label: "Forms",            scan: scanForms,     display: displayForms     },
-  tables:    { label: "Tables",           scan: scanTables,    display: displayTables    },
-  iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   },
-  buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons },
-  lists:     { label: "Lists",            scan: scanLists,     display: displayLists     },
-  targetsize:{ label: "Target size",      scan: scanTargetSize, display: displayTargetSize },
-  skiplinks: { label: "Skip links",       scan: scanSkipLinks, display: displaySkipLinks  },
-  media:     { label: "Media",            scan: scanMedia,     display: displayMedia     },
-  focusvis:  { label: "Focus visible",    scan: scanFocusVisible, display: displayFocusVisible },
-  reflow:    { label: "Reflow",           scan: scanReflow,    display: displayReflow    },
-  nontext:   { label: "Non-text contrast", scan: scanNonTextContrast, display: displayNonTextContrast },
-  animation: { label: "Animation",        scan: scanAnimation, display: displayAnimation }
+  names:      { label: "Accessible Names",       scan: scanNames,           display: displayNames           },
+  animation:  { label: "Animation",              scan: scanAnimation,       display: displayAnimation       },
+  aria:       { label: "ARIA Validation",        scan: scanAria,            display: displayAria            },
+  buttons:    { label: "Buttons & interactive",  scan: scanButtons,         display: displayButtons         },
+  contrast:   { label: "Colour Contrast",        scan: scanContrast,        display: displayContrast        },
+  focusvis:   { label: "Focus visible",          scan: scanFocusVisible,    display: displayFocusVisible    },
+  forms:      { label: "Forms",                  scan: scanForms,           display: displayForms           },
+  headings:   { label: "Headings",               scan: scanHeadings,        display: displayHeadings        },
+  iframes:    { label: "Iframes",                scan: scanIframes,         display: displayIframes         },
+  images:     { label: "Images",                 scan: scanImages,          display: displayImages          },
+  landmarks:  { label: "Landmarks",              scan: scanLandmarks,       display: displayLandmarks       },
+  links:      { label: "Link Text",              scan: scanLinks,           display: displayLinks           },
+  lists:      { label: "Lists",                  scan: scanLists,           display: displayLists           },
+  media:      { label: "Media",                  scan: scanMedia,           display: displayMedia           },
+  nontext:    { label: "Non-text contrast",      scan: scanNonTextContrast, display: displayNonTextContrast },
+  reflow:     { label: "Reflow",                 scan: scanReflow,          display: displayReflow          },
+  skiplinks:  { label: "Skip links",             scan: scanSkipLinks,       display: displaySkipLinks       },
+  tabindex:   { label: "Tabindex & Focus Order", scan: scanTabindex,        display: displayTabindex        },
+  tables:     { label: "Tables",                 scan: scanTables,          display: displayTables          },
+  targetsize: { label: "Target size",            scan: scanTargetSize,      display: displayTargetSize      },
+  document:   { label: "Title & Language",       scan: scanDocument,        display: displayDocument        }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {

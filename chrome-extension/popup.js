@@ -10,26 +10,26 @@ const api = typeof browser !== "undefined" ? browser : chrome;
 
 const CHECK_LABELS = {
   names: "Accessible Names",
-  headings: "Headings",
-  landmarks: "Landmarks",
-  images: "Images",
-  links: "Link Text",
+  animation: "Animation",
   aria: "ARIA Validation",
-  contrast: "Colour Contrast",
-  document: "Title & Language",
-  tabindex: "Tabindex & Focus Order",
-  forms: "Forms",
-  tables: "Tables",
-  iframes: "Iframes",
   buttons: "Buttons & interactive",
-  lists: "Lists",
-  targetsize: "Target size",
-  skiplinks: "Skip links",
-  media: "Media",
+  contrast: "Colour Contrast",
   focusvis: "Focus visible",
-  reflow: "Reflow",
+  forms: "Forms",
+  headings: "Headings",
+  iframes: "Iframes",
+  images: "Images",
+  landmarks: "Landmarks",
+  links: "Link Text",
+  lists: "Lists",
+  media: "Media",
   nontext: "Non-text contrast",
-  animation: "Animation"
+  reflow: "Reflow",
+  skiplinks: "Skip links",
+  tabindex: "Tabindex & Focus Order",
+  tables: "Tables",
+  targetsize: "Target size",
+  document: "Title & Language"
 };
 
 async function getActiveTab() {
