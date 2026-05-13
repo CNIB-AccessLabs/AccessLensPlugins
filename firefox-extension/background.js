@@ -33,7 +33,8 @@ const CHECKS = {
   tables:    { label: "Tables",           scan: scanTables,    display: displayTables    },
   iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   },
   buttons:   { label: "Buttons & interactive", scan: scanButtons, display: displayButtons },
-  lists:     { label: "Lists",            scan: scanLists,     display: displayLists     }
+  lists:     { label: "Lists",            scan: scanLists,     display: displayLists     },
+  targetsize:{ label: "Target size",      scan: scanTargetSize, display: displayTargetSize }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -11525,6 +11526,605 @@ function displayLists(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Lists check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: TARGET SIZE — WCAG 2.5.8 (AA, 24×24) and 2.5.5 (AAA, 44×44)
+ *
+ * Every interactive element's bounding rect is measured in CSS pixels.
+ * Each target is classified:
+ *   pass                  ≥ 24 × 24 AND ≥ 44 × 44 (no issue at either level)
+ *   fail-aaa-only         ≥ 24 × 24 but < 44 × 44 (issue at AAA only)
+ *   fail-aa-spacing-ok    < 24 × 24 but the 24-px diameter spacing
+ *                         circle centred on the target's bounding box
+ *                         doesn't intersect another target's bounding
+ *                         box, so the AA spacing exception applies
+ *   fail-aa               < 24 × 24 AND spacing exception fails (hard)
+ *   inline-link           <a href> inside flow text (inline exception)
+ *
+ * Exclusions (per spec): hidden elements, disabled elements, 0×0
+ * targets, and the user-agent-provided <html>/<body>/etc.
+ *
+ * The check intentionally does not flag the "equivalent control" or
+ * "user-agent control" exceptions because those need semantic
+ * understanding the scanner can't provide.
+ * ==================================================================== */
+
+function scanTargetSize() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+
+    var INTERACTIVE_ARIA_ROLES = {
+      button: 1, link: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1,
+      tab: 1, option: 1, checkbox: 1, radio: 1, switch: 1, treeitem: 1,
+      gridcell: 1, slider: 1, spinbutton: 1, combobox: 1
+    };
+    var CLICK_ATTRS = ["onclick", "onmousedown", "onmouseup", "onpointerdown", "onpointerup"];
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function computeAccName(el) {
+      var alb = el.getAttribute && el.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return joined;
+      }
+      var al = el.getAttribute && el.getAttribute("aria-label");
+      if (al && al.trim()) return al.trim();
+      var t = txt(el);
+      if (t) return t;
+      if (el.tagName === "INPUT") {
+        var v = el.getAttribute("value");
+        if (v && v.trim()) return v.trim();
+        var alt = el.getAttribute("alt");
+        if (alt && alt.trim()) return alt.trim();
+      }
+      var ti = el.getAttribute && el.getAttribute("title");
+      if (ti && ti.trim()) return ti.trim();
+      return "";
+    }
+
+    function isDisabled(el) {
+      if (el.hasAttribute && el.hasAttribute("disabled")) return true;
+      if (el.getAttribute && el.getAttribute("aria-disabled") === "true") return true;
+      return false;
+    }
+
+    function isInteractive(el) {
+      if (!el || !el.tagName) return false;
+      var tag = el.tagName;
+      if (tag === "BUTTON") return true;
+      if (tag === "A") return el.hasAttribute("href");
+      if (tag === "INPUT") {
+        var t = (el.getAttribute("type") || "text").toLowerCase();
+        return t !== "hidden";
+      }
+      if (tag === "SELECT" || tag === "TEXTAREA" || tag === "SUMMARY") return true;
+      var role = (el.getAttribute("role") || "").trim().toLowerCase();
+      if (role.indexOf(" ") !== -1) role = role.split(/\s+/)[0];
+      if (role && INTERACTIVE_ARIA_ROLES[role]) return true;
+      // Inline interaction handler attributes.
+      for (var i = 0; i < CLICK_ATTRS.length; i++) {
+        if (el.hasAttribute(CLICK_ATTRS[i])) return true;
+      }
+      var ti = el.getAttribute("tabindex");
+      if (ti != null) {
+        var n = parseInt(ti, 10);
+        if (isFinite(n) && n >= 0) return true;
+      }
+      return false;
+    }
+
+    function isInlineLink(el) {
+      // <a href> inside flow text. Heuristic: parent is a block element
+      // whose text content extends beyond the link's own text.
+      if (!el || el.tagName !== "A" || !el.hasAttribute("href")) return false;
+      var p = el.parentNode;
+      if (!p || p.nodeType !== 1) return false;
+      // Common "flow text" parents.
+      var pt = p.tagName;
+      var FLOW = { P: 1, LI: 1, DD: 1, DT: 1, TD: 1, TH: 1, SPAN: 1, FIGCAPTION: 1, BLOCKQUOTE: 1, ARTICLE: 1, SECTION: 1, DIV: 1, MAIN: 1, ASIDE: 1 };
+      if (!FLOW[pt]) return false;
+      // Parent text length > link text length AND parent has at least one
+      // non-empty text node sibling to the link.
+      var linkText = txt(el);
+      var parentText = txt(p);
+      if (parentText.length <= linkText.length + 5) return false;
+      // Confirm parent has direct text-node siblings to the link.
+      var hasTextSibling = false;
+      for (var i = 0; i < p.childNodes.length; i++) {
+        var c = p.childNodes[i];
+        if (c.nodeType === 3 && c.textContent && c.textContent.trim()) {
+          hasTextSibling = true;
+          break;
+        }
+      }
+      return hasTextSibling;
+    }
+
+    // First pass: collect candidates, measure, classify by raw size.
+    var candidates = [];
+
+    function collect(root) {
+      if (!root) return;
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.shadowRoot) {
+          shadowRoots++;
+          collect(el.shadowRoot);
+        }
+        if (!isInteractive(el)) continue;
+        if (isHidden(el)) continue;
+        if (isDisabled(el)) continue;
+        var rect;
+        try { rect = el.getBoundingClientRect(); } catch (e) { continue; }
+        if (!rect || (rect.width === 0 && rect.height === 0)) continue;
+        candidates.push({
+          el: el,
+          rect: rect,
+          w: rect.width,
+          h: rect.height,
+          cx: rect.left + rect.width / 2,
+          cy: rect.top + rect.height / 2,
+          undersized24: (rect.width < 24 || rect.height < 24),
+          undersized44: (rect.width < 44 || rect.height < 44)
+        });
+      }
+    }
+
+    collect(document);
+
+    function distPointToRect(px, py, r) {
+      var dx = Math.max(r.left - px, 0, px - r.right);
+      var dy = Math.max(r.top - py, 0, py - r.bottom);
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function spacingOk(target, threshold) {
+      // Spacing exception: a circle of `threshold` diameter centred on
+      // the target's bounding box must not intersect another target's
+      // bounding box.
+      var radius = threshold / 2;
+      for (var i = 0; i < candidates.length; i++) {
+        var o = candidates[i];
+        if (o === target) continue;
+        var d = distPointToRect(target.cx, target.cy, o.rect);
+        if (d < radius) return false; // overlap or too close
+      }
+      return true;
+    }
+
+    function analyse(c) {
+      var el = c.el;
+      var inline = isInlineLink(el);
+      var status, issues = [];
+
+      if (inline) {
+        status = "inline-link";
+      } else if (!c.undersized24 && !c.undersized44) {
+        status = "pass";
+      } else if (!c.undersized24 && c.undersized44) {
+        // ≥ 24×24 but < 44×44. Check 44-px spacing for AAA exception.
+        if (spacingOk(c, 44)) {
+          status = "pass"; // passes both AA outright and AAA via spacing
+        } else {
+          status = "fail-aaa-only";
+          issues.push({
+            type: "target-too-small-aaa",
+            text: "Target is " + Math.round(c.w) + "×" + Math.round(c.h) +
+                  " CSS px — passes WCAG 2.5.8 AA (≥24×24) but fails 2.5.5 AAA (<44×44), and the 44-px spacing exception does not apply (another target is within 22 px)."
+          });
+        }
+      } else {
+        // < 24×24 — check 24-px spacing.
+        if (spacingOk(c, 24)) {
+          status = "fail-aa-spacing-ok";
+          // Not flagged as an issue — spacing exception applies.
+        } else {
+          status = "fail-aa";
+          issues.push({
+            type: "target-too-small-aa",
+            text: "Target is " + Math.round(c.w) + "×" + Math.round(c.h) +
+                  " CSS px — fails WCAG 2.5.8 AA (<24×24), and the spacing exception does not apply (another target is within 12 px of this target's centre)."
+          });
+        }
+      }
+
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: el.tagName.toLowerCase(),
+        role: (el.getAttribute("role") || "").toLowerCase(),
+        type: el.tagName === "INPUT" ? (el.getAttribute("type") || "") : "",
+        accName: computeAccName(el),
+        width: Math.round(c.w),
+        height: Math.round(c.h),
+        status: status,
+        inline: inline,
+        href: el.tagName === "A" ? el.getAttribute("href") : null,
+        issues: issues,
+        _resolveSel: uniqueSelector(el)
+      };
+      return entry;
+    }
+
+    for (var i = 0; i < candidates.length; i++) {
+      results.push(analyse(candidates[i]));
+    }
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayTargetSize(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var pass = 0, failAa = 0, failAaSpacingOk = 0, failAaaOnly = 0, inline = 0, withIssues = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.status === "pass") pass++;
+      else if (c.status === "fail-aa") failAa++;
+      else if (c.status === "fail-aa-spacing-ok") failAaSpacingOk++;
+      else if (c.status === "fail-aaa-only") failAaaOnly++;
+      else if (c.status === "inline-link") inline++;
+      if (c.issues && c.issues.length) withIssues++;
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 500px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.pass { background: #1a7f1a; color: #fff; }' +
+      '.chip.spacing { background: #1a7f1a; color: #fff; }' +
+      '.chip.aaa { background: #d97706; color: #fff; }' +
+      '.chip.aa { background: #b00020; color: #fff; }' +
+      '.chip.inline { background: #6f42c1; color: #fff; }' +
+      '.chip.size { background: #555; color: #fff; font-weight: 500; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.name.missing { color: #b00020; font-style: italic; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-failaa li.row:not(.is-failaa) { display: none; }' +
+      '.panel.filter-failaaa li.row:not(.is-failaaa) { display: none; }' +
+      '.panel.filter-inline li.row:not(.is-inline) { display: none; }' +
+      '.panel.filter-pass li.row:not(.is-pass) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Target size (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      pass + " pass",
+      failAa ? (failAa + " fail AA") : null,
+      failAaSpacingOk ? (failAaSpacingOk + " AA spacing-ok") : null,
+      failAaaOnly ? (failAaaOnly + " fail AAA only") : null,
+      inline ? (inline + " inline") : null,
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="failaa">Fail AA (' + failAa + ')</button>' +
+            '<button data-filter="failaaa">Fail AAA only (' + failAaaOnly + ')</button>' +
+            '<button data-filter="inline">Inline (' + inline + ')</button>' +
+            '<button data-filter="pass">Pass (' + pass + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.status === "fail-aa") classes.push("is-failaa");
+      else if (t.status === "fail-aaa-only") classes.push("is-failaaa");
+      else if (t.status === "inline-link") classes.push("is-inline");
+      else if (t.status === "pass") classes.push("is-pass");
+      else if (t.status === "fail-aa-spacing-ok") classes.push("is-pass");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      var chipClass = "pass", chipLabel = "PASS";
+      if (t.status === "fail-aa") { chipClass = "aa"; chipLabel = "FAIL AA"; }
+      else if (t.status === "fail-aa-spacing-ok") { chipClass = "spacing"; chipLabel = "AA SPACING OK"; }
+      else if (t.status === "fail-aaa-only") { chipClass = "aaa"; chipLabel = "FAIL AAA"; }
+      else if (t.status === "inline-link") { chipClass = "inline"; chipLabel = "INLINE LINK"; }
+      html += '<span class="chip ' + chipClass + '">' + chipLabel + '</span>';
+
+      html += '<span class="chip size">' + t.width + "×" + t.height + " px</span>";
+
+      var tagDesc = "<" + t.tag + (t.type ? " type=\"" + esc(t.type) + "\"" : "") + (t.role ? " role=\"" + esc(t.role) + "\"" : "") + ">";
+      html += '<span style="font-family: ui-monospace, monospace; font-size: 13px; color:#555;">' + esc(tagDesc) + '</span>';
+
+      if (t.accName) {
+        html += '<div class="name">' + esc(t.accName.length > 70 ? t.accName.slice(0, 70) + "…" : t.accName) + '</div>';
+      } else {
+        html += '<div class="name missing">(no accessible name)</div>';
+      }
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 2.5.8 Target Size (Min., AA · 24×24) + 2.5.5 Target Size (Enhanced, AAA · 44×44). Caveats: measured at current rendered size; rotation/transforms use bounding rect; "equivalent control" and "user-agent" exceptions are not detected (these need semantic understanding).</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = "#1a7f1a";
+          if (o.status === "fail-aa") color = "#b00020";
+          else if (o.status === "fail-aaa-only") color = "#d97706";
+          else if (o.status === "inline-link") color = "#6f42c1";
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Target size\n\n";
+    md += "Counts: " + pass + " pass, " + failAa + " fail AA";
+    if (failAaSpacingOk) md += ", " + failAaSpacingOk + " AA spacing-ok";
+    if (failAaaOnly) md += ", " + failAaaOnly + " fail AAA only";
+    if (inline) md += ", " + inline + " inline";
+    md += ", " + withIssues + " with issues.\n\n";
+    md += "| # | Status | Size | Element | Name | Issues | Selector |\n";
+    md += "|---|--------|------|---------|------|--------|----------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var tagD = "<" + mt.tag + (mt.type ? " type=" + mt.type : "") + (mt.role ? " role=" + mt.role : "") + ">";
+      var name = mt.accName ? mt.accName.replace(/\|/g, "\\|") : "";
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | " + mt.status +
+            " | " + mt.width + "×" + mt.height +
+            " | " + tagD.replace(/\|/g, "\\|") +
+            " | " + name +
+            " | " + issueStr +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "` |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Target Size check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}

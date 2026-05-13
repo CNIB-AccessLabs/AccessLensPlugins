@@ -97,6 +97,12 @@
       </button>
       <p class="desc">WCAG 1.3.1. Inventory of every &lt;ul&gt;, &lt;ol&gt;, &lt;menu&gt;, &lt;dl&gt;, and every [role="list"] container, plus orphan &lt;li&gt;/&lt;dt&gt;/&lt;dd&gt;/[role="listitem"]. Flags non-&lt;li&gt; direct children of &lt;ul&gt;/&lt;ol&gt;, orphan &lt;li&gt;, empty lists, empty list items, &lt;ul&gt;/&lt;ol&gt; with list-style:none and no role="list" (Safari/VoiceOver quirk that strips list semantics), role="presentation"/"none" on natural lists (intentional strip; flagged informationally), [role="list"] without role="listitem" children, orphan role="listitem", &lt;dl&gt; with bad direct children, and broken dt/dd pairing (dt with no dd, dd with no dt).</p>
     </li>
+    <li>
+      <button class="check" data-check="targetsize">
+        <span class="label">Target size</span>
+      </button>
+      <p class="desc">WCAG 2.5.8 Target Size (Minimum, AA · 24×24 CSS px) and 2.5.5 Target Size (Enhanced, AAA · 44×44 CSS px). Measures every interactive element's bounding rect. Classifies each as pass, fail-AA, fail-AA-spacing-ok (undersized but the 24-px spacing exception applies), fail-AAA-only (passes AA but not AAA), or inline-link (in-flow-text exception). Hidden / disabled / zero-size elements are excluded per spec. Caveats listed in the panel: measured at current rendered size; rotation/transforms use bounding rect; "equivalent control" and "user-agent" exceptions can't be detected.</p>
+    </li>
   </ul>
 </section>
 <footer>

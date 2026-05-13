@@ -34,6 +34,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **non-interactive** — element has tabindex but no native interactive role and no interactive ARIA role; verify keyboard handlers (Enter/Space) are wired up.
   - **interactive-skipped** — natively interactive element has `tabindex="-1"`; deliberately removed from the tab order, worth a second look.
   - **invalid-value** — tabindex attribute is not a parseable integer.
+- **Target size check.** WCAG 2.5.8 Target Size (Minimum, AA · 24×24 CSS px) and 2.5.5 Target Size (Enhanced, AAA · 44×44 CSS px). Measures every interactive element's bounding rect and classifies into one of five statuses:
+  - **pass** — at least 24×24 AND at least 44×44 (no issue at either level).
+  - **fail-aaa-only** — at least 24×24 but smaller than 44×44, and the 44-px spacing exception fails (another target is within 22 px of this target's centre). Issue at AAA only.
+  - **fail-aa-spacing-ok** — smaller than 24×24 but the 24-px spacing exception applies (no other target inside the 12-px-radius circle). Informational; not an issue.
+  - **fail-aa** — smaller than 24×24 AND the spacing exception fails (another target is within 12 px). Hard issue.
+  - **inline-link** — `<a href>` inside flow text, exempt per the inline exception.
+  - Spacing test follows the WCAG technique: a circle of the required diameter centred on the target's bounding box must not intersect any other target's bounding box. Implemented as `distance-from-centre-to-nearest-point-of-other-target ≥ radius` over all other interactive elements on the page.
+  - **Excluded per spec**: hidden elements, `disabled`/`aria-disabled` elements, and 0×0 targets (these don't need to meet the criterion).
+  - **Caveats in panel footer**: measurement uses current rendered size (responsive pages may differ); rotation/transforms use the bounding rect (may overestimate the actual hit area); "equivalent control" and "user-agent" spec exceptions are not detected (these need semantic understanding).
+  - Filter bar: All / Issues / Fail AA / Fail AAA only / Inline / Pass. Outline colour matches status (red for AA fail, amber for AAA only, purple for inline, green otherwise).
 - **Lists check.** WCAG 1.3.1 Info and Relationships. One row per `<ul>`, `<ol>`, `<menu>`, `<dl>`, and `[role="list"]` container, plus rows for orphan `<li>`/`<dt>`/`<dd>`/`[role="listitem"]` (items that aren't inside an appropriate list container). Each row shows the element + role chip, a "list-style: none" indicator when present, item count, the first item's text as a sample, and unique selector.
   - **non-li-children** — `<ul>`/`<ol>`/`<menu>` with direct children that aren't `<li>` (other than `<script>`/`<template>`).
   - **orphan-li** — `<li>` outside any `<ul>`/`<ol>`/`<menu>` or `[role="list"]` ancestor.

@@ -22,7 +22,8 @@ const CHECK_LABELS = {
   tables: "Tables",
   iframes: "Iframes",
   buttons: "Buttons & interactive",
-  lists: "Lists"
+  lists: "Lists",
+  targetsize: "Target size"
 };
 
 async function getActiveTab() {
