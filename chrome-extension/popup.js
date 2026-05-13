@@ -16,7 +16,11 @@ const CHECK_LABELS = {
   links: "Link Text",
   aria: "ARIA Validation",
   contrast: "Colour Contrast",
-  document: "Title & Language"
+  document: "Title & Language",
+  tabindex: "Tabindex & Focus Order",
+  forms: "Forms",
+  tables: "Tables",
+  iframes: "Iframes"
 };
 
 async function getActiveTab() {

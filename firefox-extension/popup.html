@@ -61,6 +61,30 @@
       </button>
       <p class="desc">WCAG 2.4.2 (Page Titled), 3.1.1 (Language of Page), 3.1.2 (Language of Parts). Page title presence/quality, full inventory of every lang and xml:lang attribute with BCP 47 structural + case-canonical + value validation (region affects screen-reader dialect), lang/xml:lang cross-element mismatch detection, hreflang validation on links, URL-language-hint detection on foreign links, and the "lang= embedded in alt/aria-label" smell check.</p>
     </li>
+    <li>
+      <button class="check" data-check="tabindex">
+        <span class="label">Tabindex &amp; Focus Order</span>
+      </button>
+      <p class="desc">WCAG 2.4.3 (Focus Order). Full inventory of focusable elements with both their DOM position and the order the browser will actually traverse. Flags positive tabindex (anti-pattern), duplicate positive values, tabindex on non-interactive elements without an interactive role, invalid values, and natively-interactive elements deliberately removed via tabindex="-1". Sort by DOM order or focus order to see where they diverge.</p>
+    </li>
+    <li>
+      <button class="check" data-check="forms">
+        <span class="label">Forms</span>
+      </button>
+      <p class="desc">WCAG 1.3.1, 1.3.5, 3.3.1, 3.3.2, 4.1.2. Inventory of every form control grouped by &lt;form&gt;. Flags unlabeled controls, placeholder-as-label, wrapping &lt;label&gt;…&lt;input&gt;&lt;/label&gt; (breaks Dragon NaturallySpeaking), labels not left-aligned above their input (hard to find at high magnification), multiple controls on the same horizontal line (also a magnifier problem), missing visible required indicator, required attribute used where aria-required is correct, broken aria-describedby/labelledby ID refs, missing or invalid autocomplete on personal-data fields, radio/checkbox groups not wrapped in fieldset, empty legends, image inputs without alt, aria-disabled on focusable controls, forms with no submit, and forms relying on native browser bubble validation (bubbles auto-dismiss and are unusable at high zoom).</p>
+    </li>
+    <li>
+      <button class="check" data-check="tables">
+        <span class="label">Tables</span>
+      </button>
+      <p class="desc">WCAG 1.3.1. Every &lt;table&gt; classified data / layout-declared / ambiguous. Data tables flagged when they lack a caption/aria-label, have no &lt;th&gt;, mix complex headers without scope=, or have spanned cells without explicit headers= wiring. Layout tables flagged when they carry data signals (caption, summary=, aria-label) or when role="presentation"/"none" contradicts the data semantics on the same table. Also flags multiple captions, caption not as the first child, obsolete summary= attribute, nested tables, invalid scope values, empty &lt;th&gt;, broken headers= ID refs, and "looks-like-data-but-no-&lt;th&gt;" (first row visually styled as a header).</p>
+    </li>
+    <li>
+      <button class="check" data-check="iframes">
+        <span class="label">Iframes</span>
+      </button>
+      <p class="desc">WCAG 2.4.1, 4.1.2. Inventory of every &lt;iframe&gt; (plus deprecated &lt;frame&gt;/&lt;frameset&gt;) across the top document and all nested frames. Flags missing/empty title, generic frame names ("iframe", "frame", "embedded content", "frame N"), names that just repeat the src URL/hostname/filename, duplicate names across frames, tabindex="-1" on visible iframes (removes the embedded doc from tab order), positive tabindex, aria-hidden="true" on substantial-sized iframes with content (focusable-but-hidden trap), tiny/off-screen iframes without aria-hidden (analytics pixels), role="presentation"/"none" on iframes with content, and empty iframes (no src, no srcdoc). Same-origin vs cross-origin marked per row.</p>
+    </li>
   </ul>
 </section>
 <footer>

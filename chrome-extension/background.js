@@ -27,7 +27,11 @@ const CHECKS = {
   links:     { label: "Link Text",        scan: scanLinks,     display: displayLinks     },
   aria:      { label: "ARIA Validation",  scan: scanAria,      display: displayAria      },
   contrast:  { label: "Colour Contrast",  scan: scanContrast,  display: displayContrast  },
-  document:  { label: "Title & Language", scan: scanDocument,  display: displayDocument  }
+  document:  { label: "Title & Language", scan: scanDocument,  display: displayDocument  },
+  tabindex:  { label: "Tabindex & Focus Order", scan: scanTabindex, display: displayTabindex },
+  forms:     { label: "Forms",            scan: scanForms,     display: displayForms     },
+  tables:    { label: "Tables",           scan: scanTables,    display: displayTables    },
+  iframes:   { label: "Iframes",          scan: scanIframes,   display: displayIframes   }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -6051,4 +6055,3855 @@ function displayDocument(framesData, checkId) {
     delete window[P + "active"];
     console.log("%c[a11yn] cleared.", "color:#003876");
   };
+}
+
+/* ====================================================================
+ * CHECK: TABINDEX — focus order inspector (WCAG 2.4.3)
+ *
+ * Reports every focusable element on the page, with:
+ *   - its DOM position (the order keyboard users naturally expect)
+ *   - its FOCUS position (the order the browser will actually traverse,
+ *     per HTML "sequential focus navigation order")
+ *   - its tabindex value (explicit or implicit)
+ *   - its role (native or explicit)
+ *
+ * Per the HTML spec, sequential focus navigation visits:
+ *   1. Elements with positive tabindex, in ascending order of value;
+ *      ties broken by DOM order.
+ *   2. Then elements with tabindex="0" or naturally focusable elements
+ *      with no explicit tabindex, in DOM order.
+ *   3. Elements with tabindex="-1" are skipped entirely (still
+ *      programmatically focusable via .focus()).
+ *
+ * Issues flagged:
+ *   positive-tabindex     value > 0 breaks the natural DOM order; widely
+ *                         considered an anti-pattern.
+ *   duplicate-positive    multiple elements share the same positive
+ *                         tabindex value; order is undefined among them.
+ *   non-interactive       element has tabindex (typically 0) but no
+ *                         native interactive role and no interactive
+ *                         ARIA role — verify the dev added keyboard
+ *                         handlers (Enter/Space) for it.
+ *   interactive-skipped   natively interactive element has tabindex="-1"
+ *                         — intentionally removed from the tab order;
+ *                         common for offscreen widgets but worth a
+ *                         second look.
+ *   invalid-value         tabindex attribute is not a parseable integer.
+ *
+ * Inventory-first: every focusable element appears, not just the
+ * problematic ones, so the auditor sees the full keyboard journey.
+ * ==================================================================== */
+
+function scanTabindex() {
+  "use strict";
+  try {
+
+    /* ----- helpers ----- */
+
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        if (!win) return false;
+        var st = win.getComputedStyle(el);
+        return st.display === "none" || st.visibility === "hidden";
+      } catch (e) { return false; }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    /* ----- focusability detection ----- */
+
+    var NATIVELY_FOCUSABLE_TAGS = new Set([
+      "a", "button", "input", "select", "textarea", "summary",
+      "audio", "video", "iframe", "object", "embed"
+    ]);
+    var INTERACTIVE_ROLES = new Set([
+      "button", "link", "checkbox", "radio", "switch", "tab", "menuitem",
+      "menuitemcheckbox", "menuitemradio", "option", "combobox", "textbox",
+      "searchbox", "slider", "spinbutton", "treeitem", "tabpanel"
+    ]);
+
+    function isNativelyInteractive(el) {
+      var tag = el.tagName.toLowerCase();
+      if (tag === "a") return el.hasAttribute("href");
+      if (tag === "button" || tag === "select" || tag === "textarea") {
+        return !el.hasAttribute("disabled");
+      }
+      if (tag === "input") {
+        if (el.hasAttribute("disabled")) return false;
+        var t = (el.getAttribute("type") || "text").toLowerCase();
+        return t !== "hidden";
+      }
+      if (tag === "summary") return true;
+      if (tag === "iframe") return true;
+      if (tag === "audio" || tag === "video") return el.hasAttribute("controls");
+      return false;
+    }
+
+    function getRole(el) {
+      var explicit = el.getAttribute("role");
+      if (explicit) {
+        // First valid token
+        var first = explicit.trim().split(/\s+/)[0];
+        return { value: first, explicit: true };
+      }
+      var tag = el.tagName.toLowerCase();
+      if (tag === "a") return { value: el.hasAttribute("href") ? "link" : "", explicit: false };
+      if (tag === "button") return { value: "button", explicit: false };
+      if (tag === "select") return { value: el.multiple ? "listbox" : "combobox", explicit: false };
+      if (tag === "textarea") return { value: "textbox", explicit: false };
+      if (tag === "summary") return { value: "button", explicit: false };
+      if (tag === "input") {
+        var t = (el.getAttribute("type") || "text").toLowerCase();
+        var map = {
+          checkbox: "checkbox", radio: "radio",
+          button: "button", submit: "button", reset: "button", image: "button",
+          range: "slider", number: "spinbutton",
+          search: "searchbox", email: "textbox", tel: "textbox",
+          url: "textbox", text: "textbox"
+        };
+        return { value: map[t] || (t === "password" ? "" : "textbox"), explicit: false };
+      }
+      return { value: "", explicit: false };
+    }
+
+    function isContentEditable(el) {
+      var ce = el.getAttribute("contenteditable");
+      return ce === "" || ce === "true";
+    }
+
+    /* ----- parse tabindex ----- */
+
+    function parseTabindex(raw) {
+      if (raw === null) return { present: false, value: null, valid: true, raw: null };
+      var trimmed = raw.trim();
+      if (trimmed === "") return { present: true, value: null, valid: false, raw: raw, error: "empty value" };
+      // HTML parses tabindex as an "integer"; non-integer values are ignored at the platform level.
+      // We're stricter: flag anything non-integer.
+      if (!/^-?\d+$/.test(trimmed)) {
+        return { present: true, value: null, valid: false, raw: raw, error: 'not an integer ("' + raw + '")' };
+      }
+      var n = parseInt(trimmed, 10);
+      return { present: true, value: n, valid: true, raw: raw };
+    }
+
+    /* ----- collect candidates ----- */
+
+    // We collect every element that is focusable OR has an explicit tabindex
+    // (even if -1, which removes it from tab order but still surfaces in the
+    // inventory). Then we walk shadow roots.
+
+    var SELECTOR = [
+      "a[href]", "button", "input", "select", "textarea", "summary",
+      "audio[controls]", "video[controls]", "iframe", "object", "embed",
+      "[tabindex]", "[contenteditable]"
+    ].join(",");
+
+    var results = [];
+    var seenEls = new Set();
+    var domCounter = 0;
+    var shadowRoots = 0;
+
+    function processElement(el) {
+      if (seenEls.has(el)) return;
+      seenEls.add(el);
+      if (isHidden(el)) return;
+      var rect;
+      try { rect = el.getBoundingClientRect(); } catch (e) { return; }
+      // Allow 0x0 only for elements with explicit tabindex (could be sr-only).
+      var hasExplicitTabindex = el.hasAttribute("tabindex");
+      if (rect.width === 0 && rect.height === 0 && !hasExplicitTabindex) return;
+
+      var tag = el.tagName.toLowerCase();
+      var tabindex = parseTabindex(el.getAttribute("tabindex"));
+      var nativeInteractive = isNativelyInteractive(el);
+      var role = getRole(el);
+      var hasInteractiveRole = INTERACTIVE_ROLES.has(role.value);
+      var contentEditable = isContentEditable(el);
+
+      // Determine whether the element is in the keyboard tab order
+      // tabindex value > 0: in order, position = value
+      // tabindex value === 0: in order, position = DOM order
+      // tabindex value === -1: NOT in tab order (still scriptable focus)
+      // no tabindex: in order if natively interactive or contenteditable
+      var inTabOrder;
+      if (!tabindex.valid && tabindex.present) {
+        // Invalid value — HTML spec says treat as not set; we'll surface
+        // the issue but treat as untabindexed for ordering
+        inTabOrder = nativeInteractive || contentEditable;
+      } else if (tabindex.value === null) {
+        // No explicit tabindex
+        inTabOrder = nativeInteractive || contentEditable;
+      } else if (tabindex.value === -1) {
+        inTabOrder = false;
+      } else {
+        inTabOrder = true;
+      }
+
+      // Sample text for context
+      var sample = "";
+      if (tag === "a" || tag === "button" || tag === "summary") {
+        sample = txt(el.textContent).slice(0, 80);
+      } else if (tag === "input") {
+        sample = el.getAttribute("value") || el.getAttribute("placeholder") || "";
+        sample = txt(sample).slice(0, 80);
+      } else if (tag === "select") {
+        sample = "(select)";
+      } else if (tag === "textarea") {
+        sample = txt(el.value || el.getAttribute("placeholder") || "").slice(0, 80);
+      } else if (tag === "iframe") {
+        sample = el.getAttribute("title") || el.getAttribute("src") || "(iframe)";
+        sample = txt(sample).slice(0, 80);
+      } else {
+        var aLabel = el.getAttribute("aria-label");
+        if (aLabel) sample = aLabel;
+        else sample = txt(el.textContent).slice(0, 80);
+      }
+
+      results.push({
+        domOrderIndex: ++domCounter,
+        tag: tag,
+        tabindex: tabindex,
+        nativeInteractive: nativeInteractive,
+        role: role,
+        hasInteractiveRole: hasInteractiveRole,
+        contentEditable: contentEditable,
+        inTabOrder: inTabOrder,
+        focusOrderIndex: null,  // assigned after sorting
+        sample: sample,
+        selector: uniqueSelector(el),
+        rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
+      });
+    }
+
+    function walk(root) {
+      var matches;
+      try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
+      Array.prototype.forEach.call(matches, function (el) { processElement(el); });
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      Array.prototype.forEach.call(all, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document);
+
+    /* ----- compute focus order ----- */
+
+    // Per HTML spec sequential focus navigation:
+    //   Pass 1: positive tabindex elements sorted by (tabindex asc, DOM asc)
+    //   Pass 2: tabindex=0 or implicit focusables in DOM order
+    //   Skipped: tabindex=-1 entirely
+    var positives = results.filter(function (r) {
+      return r.inTabOrder && r.tabindex.valid && r.tabindex.value !== null && r.tabindex.value > 0;
+    }).slice();
+    positives.sort(function (a, b) {
+      if (a.tabindex.value !== b.tabindex.value) return a.tabindex.value - b.tabindex.value;
+      return a.domOrderIndex - b.domOrderIndex;
+    });
+
+    var zerosOrImplicit = results.filter(function (r) {
+      if (!r.inTabOrder) return false;
+      // Already counted in positives?
+      if (r.tabindex.valid && r.tabindex.value !== null && r.tabindex.value > 0) return false;
+      return true;
+    }).slice();
+    zerosOrImplicit.sort(function (a, b) { return a.domOrderIndex - b.domOrderIndex; });
+
+    var ordered = positives.concat(zerosOrImplicit);
+    ordered.forEach(function (r, i) { r.focusOrderIndex = i + 1; });
+
+    /* ----- detect duplicate positive tabindex values ----- */
+
+    var positiveByValue = new Map();
+    positives.forEach(function (r) {
+      var v = r.tabindex.value;
+      if (!positiveByValue.has(v)) positiveByValue.set(v, []);
+      positiveByValue.get(v).push(r);
+    });
+
+    /* ----- per-element issues ----- */
+
+    results.forEach(function (r) {
+      r.issues = [];
+
+      if (r.tabindex.present && !r.tabindex.valid) {
+        r.issues.push({ category: "invalid-value", text: 'tabindex="' + r.tabindex.raw + '" is ' + r.tabindex.error });
+      }
+
+      if (r.tabindex.valid && r.tabindex.value !== null && r.tabindex.value > 0) {
+        r.issues.push({
+          category: "positive-tabindex",
+          text: 'positive tabindex (' + r.tabindex.value + ') overrides the natural DOM order — anti-pattern; use tabindex="0" or 0 / -1 only'
+        });
+        var dupes = positiveByValue.get(r.tabindex.value) || [];
+        if (dupes.length > 1) {
+          var others = dupes.filter(function (o) { return o.domOrderIndex !== r.domOrderIndex; }).map(function (o) { return o.domOrderIndex; });
+          r.issues.push({
+            category: "duplicate-positive",
+            text: dupes.length + ' elements share tabindex="' + r.tabindex.value + '"; order among them is undefined',
+            relatedDom: others
+          });
+        }
+      }
+
+      if (r.tabindex.valid && r.tabindex.value === -1 && r.nativeInteractive) {
+        r.issues.push({
+          category: "interactive-skipped",
+          text: 'natively interactive <' + r.tag + '> has tabindex="-1" — deliberately removed from the tab order; verify this is intentional (e.g. an off-screen widget)'
+        });
+      }
+
+      if (r.tabindex.present && r.tabindex.valid && !r.nativeInteractive && !r.hasInteractiveRole && !r.contentEditable && r.tabindex.value !== null && r.tabindex.value >= 0) {
+        // tabindex on a generic element without interactive role
+        r.issues.push({
+          category: "non-interactive",
+          text: '<' + r.tag + '> has tabindex but no native interactive role and no interactive ARIA role — verify keyboard handlers (Enter/Space) and an explicit role are wired up'
+        });
+      }
+    });
+
+    return {
+      url: window.location.href,
+      isTop: window === window.top,
+      results: results,
+      shadowRoots: shadowRoots,
+      orderedFocusable: ordered.length,
+      hasPositiveTabindex: positives.length > 0
+    };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, results: [], error: String(e && e.message || e) };
+  }
+}
+
+function displayTabindex(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+  // Body is wrapped in try/catch so any thrown error surfaces visibly
+  // (red error banner in the top-right + console.error) rather than
+  // failing silently inside the executeScript injection boundary.
+  try {
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  var allResults = [];
+  var unmatchedFrames = 0;
+  var frameLabelByUrl = new Map();
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    if (!frame.results || !frame.results.length) return;
+    var offX = 0, offY = 0, positioned = true, inFrame = !frame.isTop;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    frame.results.forEach(function (r) {
+      allResults.push({
+        domOrderIndex: r.domOrderIndex,
+        focusOrderIndex: r.focusOrderIndex,
+        tag: r.tag,
+        tabindex: r.tabindex,
+        nativeInteractive: r.nativeInteractive,
+        role: r.role,
+        hasInteractiveRole: r.hasInteractiveRole,
+        contentEditable: r.contentEditable,
+        inTabOrder: r.inTabOrder,
+        sample: r.sample,
+        issues: r.issues,
+        selector: r.selector,
+        frameUrl: frame.url,
+        frameLabel: inFrame ? frameLabelByUrl.get(frame.url) : null,
+        isTop: !inFrame,
+        pageTop: window.scrollY + offY + r.rect.top,
+        pageLeft: window.scrollX + offX + r.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      });
+    });
+  });
+  // Number rows in DOM order across frames (1-based, used as the "row #")
+  allResults.forEach(function (r, i) { r.rowIndex = i + 1; });
+
+  // Resolve element refs for outline + click-to-scroll
+  allResults.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var color = "#003876", style = "solid";
+        var hasErr = r.issues.some(function (i) { return i.category === "positive-tabindex" || i.category === "duplicate-positive" || i.category === "invalid-value"; });
+        var hasWarn = r.issues.some(function (i) { return i.category === "non-interactive" || i.category === "interactive-skipped"; });
+        if (hasErr) { color = "#b00020"; style = "dashed"; }
+        else if (hasWarn) { color = "#b45309"; style = "dashed"; }
+        else if (!r.inTabOrder) { color = "#999"; style = "dotted"; }
+        el.style.setProperty("outline", "2px " + style + " " + color, "important");
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  /* ----- shadow UI ----- */
+
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.err{background:#b00020;}" +
+    ".badge.warn{background:#b45309;}" +
+    ".badge.skipped{background:#666;}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:600px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;flex-wrap:wrap;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:13px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
+    ".panel .sortbar{display:flex;gap:6px;padding:6px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:13px;color:#555;align-items:center;}" +
+    ".panel .sortbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:12px;font-weight:500;}" +
+    ".panel .sortbar button.active{background:#0a5d2e;color:#fff !important;border-color:#0a5d2e;}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;overflow:auto;flex:1 1 auto;}" +
+    ".panel li{padding:8px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;display:flex;align-items:flex-start;gap:10px;border-left:4px solid transparent;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li.has-err{border-left-color:#b00020;}" +
+    ".panel li.has-warn{border-left-color:#b45309;}" +
+    ".panel li.not-in-order{background:#fafafa;opacity:0.85;}" +
+    ".panel.filter-issues li:not(.has-err):not(.has-warn){display:none;}" +
+    ".panel.filter-positive li:not(.has-positive){display:none;}" +
+    ".panel.filter-explicit li:not(.has-explicit){display:none;}" +
+    ".panel.filter-non-interactive li:not(.is-non-interactive){display:none;}" +
+    ".panel.filter-not-in-order li:not(.not-in-order){display:none;}" +
+    ".panel li .focuschip{flex:0 0 auto;display:inline-block;min-width:50px;text-align:center;padding:4px 8px;border-radius:3px;background:#0a5d2e;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;font-family:ui-monospace,monospace !important;}" +
+    ".panel li .focuschip.skipped{background:#999;}" +
+    ".panel li .focuschip.positive{background:#b00020;}" +
+    ".panel li .tichip{flex:0 0 auto;display:inline-block;min-width:48px;text-align:center;padding:4px 8px;border-radius:3px;background:#003876;color:#fff !important;font-size:14px;font-weight:700 !important;line-height:1.2;font-family:ui-monospace,monospace !important;}" +
+    ".panel li .tichip.implicit{background:#666;}" +
+    ".panel li .tichip.positive{background:#b00020;}" +
+    ".panel li .tichip.negative{background:#999;}" +
+    ".panel li .tichip.zero{background:#0a8043;}" +
+    ".panel li .tichip.invalid{background:#b00020;}" +
+    ".panel li .body{flex:1 1 auto;min-width:0;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .sample{font-weight:600 !important;color:#111;font-size:15px;word-break:break-word;}" +
+    ".panel li .sample.empty{color:#666;font-style:italic;font-weight:400 !important;}" +
+    ".panel li .issues{margin-top:4px;font-size:14px;}" +
+    ".panel li .issue{display:flex;gap:6px;margin-top:2px;}" +
+    ".panel li .issue .catchip{flex:0 0 auto;padding:1px 6px;border-radius:3px;color:#fff !important;font-size:11px;font-weight:700 !important;line-height:1.4;}" +
+    ".panel li .issue .text{flex:1 1 auto;font-weight:600 !important;}" +
+    ".panel li .issue.err .text{color:#b00020;}" +
+    ".panel li .issue.warn .text{color:#7a4a09;}" +
+    ".panel li .issue.err .catchip{background:#b00020;}" +
+    ".panel li .issue.warn .catchip{background:#b45309;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:3px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  /* ----- badges ----- */
+
+  var badges = [];
+  allResults.forEach(function (r) {
+    if (!r.positioned) return;
+    var badge = document.createElement("div");
+    var cls = "badge";
+    var hasErr = r.issues.some(function (i) { return i.category === "positive-tabindex" || i.category === "duplicate-positive" || i.category === "invalid-value"; });
+    var hasWarn = r.issues.some(function (i) { return i.category === "non-interactive" || i.category === "interactive-skipped"; });
+    if (hasErr) cls += " err";
+    else if (hasWarn) cls += " warn";
+    else if (!r.inTabOrder) cls += " skipped";
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    var prefix = r.isTop ? "" : "[frame] ";
+    var tabidxStr = r.tabindex.present ? "ti=" + (r.tabindex.valid ? r.tabindex.value : r.tabindex.raw) : "ti=implicit";
+    var focusStr = r.focusOrderIndex !== null ? "F#" + r.focusOrderIndex : "F:skip";
+    badge.textContent = "D#" + r.domOrderIndex + " " + prefix + r.tag + " " + focusStr + " " + tabidxStr;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  /* ----- counts ----- */
+
+  var counts = {
+    total: allResults.length,
+    inOrder: 0,
+    notInOrder: 0,
+    positive: 0,
+    explicit: 0,
+    nonInteractive: 0,
+    duplicatePositive: 0,
+    invalid: 0,
+    interactiveSkipped: 0
+  };
+  allResults.forEach(function (r) {
+    if (r.inTabOrder) counts.inOrder++; else counts.notInOrder++;
+    if (r.tabindex.present) counts.explicit++;
+    if (r.tabindex.valid && r.tabindex.value !== null && r.tabindex.value > 0) counts.positive++;
+    r.issues.forEach(function (i) {
+      if (i.category === "non-interactive") counts.nonInteractive++;
+      if (i.category === "duplicate-positive") counts.duplicatePositive++;
+      if (i.category === "invalid-value") counts.invalid++;
+      if (i.category === "interactive-skipped") counts.interactiveSkipped++;
+    });
+  });
+  var totalIssues = allResults.filter(function (r) { return r.issues.length > 0; }).length;
+  var frameCount = framesData.filter(function (f) { return !f.isTop && f.results && f.results.length; }).length;
+
+  /* ----- console + markdown ----- */
+
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  var md = "| Row | Frame | DOM# | Focus# | Tag | tabindex | Role | Sample | Issues | Selector |\n";
+  md += "|-----|-------|------|--------|-----|----------|------|--------|--------|----------|\n";
+  allResults.forEach(function (r) {
+    var tabidx = r.tabindex.present ? (r.tabindex.valid ? String(r.tabindex.value) : '`"' + mdEsc(r.tabindex.raw) + '"` *(invalid)*') : "*(implicit)*";
+    var focusStr = r.focusOrderIndex !== null ? String(r.focusOrderIndex) : "*(skipped)*";
+    var issues = r.issues.length ? "⚠ " + r.issues.map(function (i) {
+      var more = i.relatedDom && i.relatedDom.length ? " (also DOM#: " + i.relatedDom.map(function (d) { return "D#" + d; }).join(", ") + ")" : "";
+      return mdEsc(i.text) + more;
+    }).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    var sampleCell = r.sample ? mdEsc(r.sample) : "*(no text)*";
+    var roleCell = r.role.value ? r.role.value + (r.role.explicit ? " *(explicit)*" : "") : "";
+    md += "| " + r.rowIndex + " | " + frameLabel + " | D#" + r.domOrderIndex + " | " + focusStr + " | `" + r.tag + "` | " + tabidx + " | " + roleCell + " | " + sampleCell + " | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  console.group("%c[a11yn tabindex] " + allResults.length + " focusable element(s) — " + counts.positive + " positive tabindex, " + counts.nonInteractive + " non-interactive with tabindex, " + counts.notInOrder + " skipped (tabindex=-1)",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allResults.map(function (r) {
+    return {
+      "row": r.rowIndex,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      "DOM#": r.domOrderIndex,
+      "Focus#": r.focusOrderIndex !== null ? r.focusOrderIndex : "(skipped)",
+      tag: r.tag,
+      tabindex: r.tabindex.present ? (r.tabindex.valid ? r.tabindex.value : ("invalid: " + r.tabindex.raw)) : "implicit",
+      role: r.role.value,
+      sample: r.sample,
+      issues: r.issues.length
+    };
+  }));
+  console.log("%cMarkdown table:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  /* ----- panel ----- */
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel filter-all";
+
+  var summary = "";
+  if (allResults.length === 0) {
+    summary += '<span class="warn">No focusable elements found.</span>';
+  } else if (totalIssues === 0) {
+    summary += '<span class="ok">All ' + counts.inOrder + ' focusable element' + (counts.inOrder === 1 ? "" : "s") + ' use natural tab order.</span>';
+  } else {
+    var bits = [];
+    if (counts.positive) bits.push('<span class="miss">' + counts.positive + ' positive tabindex</span>');
+    if (counts.duplicatePositive) bits.push('<span class="miss">' + counts.duplicatePositive + ' duplicate positive</span>');
+    if (counts.invalid) bits.push('<span class="miss">' + counts.invalid + ' invalid value</span>');
+    if (counts.nonInteractive) bits.push('<span class="warn">' + counts.nonInteractive + ' non-interactive with tabindex</span>');
+    if (counts.interactiveSkipped) bits.push('<span class="warn">' + counts.interactiveSkipped + ' interactive skipped (tabindex=-1)</span>');
+    summary += bits.join(" · ");
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">';
+  summary += counts.total + " focusable · " + counts.inOrder + " in tab order · " + counts.notInOrder + " skipped · " + counts.explicit + " with explicit tabindex · top doc";
+  if (frameCount) summary += " + " + frameCount + " frame" + (frameCount === 1 ? "" : "s");
+  if (unmatchedFrames) summary += " · ⚠ " + unmatchedFrames + " unpositioned frame(s)";
+  summary += "</div>";
+
+  panelEl.innerHTML =
+    "<header><strong>Tabindex &amp; Focus Order (" + allResults.length + ")</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+      '<button data-filter="issues">Issues (' + totalIssues + ')</button>' +
+      '<button data-filter="positive">Positive (' + counts.positive + ')</button>' +
+      '<button data-filter="explicit">Explicit tabindex (' + counts.explicit + ')</button>' +
+      '<button data-filter="non-interactive">Non-interactive (' + counts.nonInteractive + ')</button>' +
+      '<button data-filter="not-in-order">Skipped (' + counts.notInOrder + ')</button>' +
+    '</div>' +
+    '<div class="sortbar">Sort: ' +
+      '<button data-sort="dom" class="active">DOM order</button>' +
+      '<button data-sort="focus">Focus order</button>' +
+    '</div>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<ol id="' + P + 'list"></ol>';
+
+  /* ----- render rows ----- */
+
+  function renderRows() {
+    var sortMode = panelEl.dataset.sort || "dom";
+    var list = panelEl.querySelector("#" + P + "list");
+    list.innerHTML = "";
+    var sorted = allResults.slice();
+    if (sortMode === "focus") {
+      // In-order first by focus#, then skipped at end by DOM#
+      sorted.sort(function (a, b) {
+        if (a.focusOrderIndex === null && b.focusOrderIndex === null) return a.domOrderIndex - b.domOrderIndex;
+        if (a.focusOrderIndex === null) return 1;
+        if (b.focusOrderIndex === null) return -1;
+        return a.focusOrderIndex - b.focusOrderIndex;
+      });
+    } else {
+      sorted.sort(function (a, b) { return a.domOrderIndex - b.domOrderIndex; });
+    }
+
+    sorted.forEach(function (r) {
+      var li = document.createElement("li");
+      var hasErr = r.issues.some(function (i) { return i.category === "positive-tabindex" || i.category === "duplicate-positive" || i.category === "invalid-value"; });
+      var hasWarn = r.issues.some(function (i) { return i.category === "non-interactive" || i.category === "interactive-skipped"; });
+      if (hasErr) li.classList.add("has-err");
+      else if (hasWarn) li.classList.add("has-warn");
+      if (r.tabindex.valid && r.tabindex.value !== null && r.tabindex.value > 0) li.classList.add("has-positive");
+      if (r.tabindex.present) li.classList.add("has-explicit");
+      if (r.issues.some(function (i) { return i.category === "non-interactive"; })) li.classList.add("is-non-interactive");
+      if (!r.inTabOrder) li.classList.add("not-in-order");
+
+      var focusStr, focusCls;
+      if (r.focusOrderIndex !== null) {
+        focusStr = "F#" + r.focusOrderIndex;
+        focusCls = "focuschip";
+        if (r.tabindex.valid && r.tabindex.value !== null && r.tabindex.value > 0) focusCls += " positive";
+      } else {
+        focusStr = "skip";
+        focusCls = "focuschip skipped";
+      }
+
+      var tiStr, tiCls;
+      if (!r.tabindex.present) {
+        tiStr = "—";
+        tiCls = "tichip implicit";
+      } else if (!r.tabindex.valid) {
+        tiStr = '"' + r.tabindex.raw + '"';
+        tiCls = "tichip invalid";
+      } else if (r.tabindex.value > 0) {
+        tiStr = String(r.tabindex.value);
+        tiCls = "tichip positive";
+      } else if (r.tabindex.value < 0) {
+        tiStr = String(r.tabindex.value);
+        tiCls = "tichip negative";
+      } else {
+        tiStr = "0";
+        tiCls = "tichip zero";
+      }
+
+      var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+      var roleStr = r.role.value ? esc(r.role.value) + (r.role.explicit ? ' <span style="color:#555">(explicit)</span>' : "") : "";
+      var domStr = "DOM #" + r.domOrderIndex;
+      var sampleHtml = r.sample
+        ? '<div class="sample">"' + esc(r.sample) + '"</div>'
+        : '<div class="sample empty">(no text)</div>';
+
+      var issuesHtml = "";
+      if (r.issues.length) {
+        issuesHtml = '<div class="issues">' + r.issues.map(function (iss) {
+          var cls = (iss.category === "positive-tabindex" || iss.category === "duplicate-positive" || iss.category === "invalid-value") ? "issue err" : "issue warn";
+          var more = "";
+          if (iss.relatedDom && iss.relatedDom.length) {
+            more = ' <span style="color:#555">(also DOM #: ' + iss.relatedDom.map(function (d) { return "D#" + d; }).join(", ") + ")</span>";
+          }
+          return '<div class="' + cls + '"><span class="catchip">' + esc(iss.category) + '</span><span class="text">' + esc(iss.text) + more + '</span></div>';
+        }).join("") + '</div>';
+      }
+
+      li.innerHTML =
+        '<span class="' + focusCls + '">' + esc(focusStr) + '</span>' +
+        '<span class="' + tiCls + '">' + esc(tiStr) + '</span>' +
+        '<div class="body">' +
+          '<div class="meta">' + location + "<code>&lt;" + esc(r.tag) + "&gt;</code>" + (roleStr ? " · " + roleStr : "") + " · " + esc(domStr) + (r.nativeInteractive ? "" : ' <span style="color:#7a4a09">(not natively interactive)</span>') + "</div>" +
+          sampleHtml +
+          issuesHtml +
+          '<div class="src">' + esc(r.selector) + "</div>" +
+        "</div>";
+
+      li.addEventListener("click", function () {
+        try {
+          if (r._resolveEl) {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+          } else if (r.iframeEl) {
+            r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+          if (r.badge) {
+            r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+          }
+        } catch (e) {}
+      });
+      list.appendChild(li);
+    });
+  }
+
+  panelEl.dataset.sort = "dom";
+  shadow.appendChild(panelEl);
+  renderRows();
+
+  /* ----- wire filter + sort bars ----- */
+
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+  panelEl.querySelectorAll(".sortbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      panelEl.dataset.sort = btn.dataset.sort;
+      panelEl.querySelectorAll(".sortbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+      renderRows();
+    });
+  });
+
+  /* ----- drag ----- */
+
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allResults.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+  } catch (displayErr) {
+    console.error("[a11yn tabindex display error]", displayErr);
+    try {
+      var errHost = document.createElement("div");
+      errHost.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;background:#b00020 !important;color:#fff !important;padding:12px 16px !important;font:600 14px/1.4 ui-sans-serif,system-ui,sans-serif !important;border-radius:6px !important;max-width:400px !important;box-shadow:0 6px 20px rgba(0,0,0,.25) !important;white-space:pre-wrap !important;";
+      errHost.textContent = "Tabindex display error: " + (displayErr && displayErr.message ? displayErr.message : displayErr) + ". See page DevTools console for full stack.";
+      (document.body || document.documentElement).appendChild(errHost);
+      setTimeout(function () { try { errHost.remove(); } catch (e) {} }, 10000);
+    } catch (e) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: FORMS — form-control inspector
+ *
+ * Inspects every form control on the page: <input> (non-hidden),
+ * <select>, <textarea>, <button>, plus elements with input-like ARIA
+ * roles. Groups them by parent <form> (or "no-form" for orphan controls).
+ *
+ * Issue categories (per control unless noted):
+ *
+ *   unlabeled                    no accessible name at all
+ *   placeholder-as-label         only label source is the placeholder attr
+ *   label-in-name-mismatch       visible label text not part of accname
+ *                                (WCAG 2.5.3 — affects voice control)
+ *   wrapping-label-implicit      <label>text<input/></label> without for=;
+ *                                works for SR but Dragon prefers for=id
+ *   multiple-labels              more than one <label for="X"> points at
+ *                                the same id
+ *   label-not-left-aligned       label is above the input but not
+ *                                left-aligned with it (magnifier issue)
+ *   label-side-positioned        label sits left or right of the input
+ *                                (magnifier loses it at high zoom)
+ *   label-below-input            label is below the input
+ *   multi-control-row            this control shares a horizontal band
+ *                                with another (magnifier issue)
+ *   required-no-visible-indicator  required attr or aria-required but no
+ *                                  asterisk / "required" in label or
+ *                                  immediately to the right
+ *   required-indicator-no-attr   visible "required" indicator but no
+ *                                  required attribute or aria-required
+ *   required-aria-contradiction  required attr + aria-required="false"
+ *   required-no-aria-required    required attr without aria-required;
+ *                                  best practice to set both
+ *   bad-idref                    aria-describedby / aria-errormessage /
+ *                                aria-controls / aria-labelledby points
+ *                                to a non-existent id
+ *   invalid-no-error-ref         aria-invalid="true" but no
+ *                                aria-describedby / aria-errormessage
+ *                                points to a message
+ *   missing-autocomplete         input looks like it collects personal
+ *                                info (email, name, phone, postcode...)
+ *                                but has no autocomplete attribute
+ *                                (WCAG 1.3.5)
+ *   invalid-autocomplete         autocomplete value not on the HTML
+ *                                spec's autofill-detail-tokens list
+ *   aria-disabled-focusable      aria-disabled="true" but element still
+ *                                in the tab order; confusing for kbd
+ *                                users
+ *   image-input-no-alt           <input type="image"> with no alt
+ *   group-no-fieldset            radios/checkboxes sharing name= but
+ *                                not wrapped in <fieldset>+<legend>
+ *                                or [role=group][aria-labelledby]
+ *                                (per-group flag, attached to each
+ *                                member)
+ *   empty-legend                 <fieldset>'s <legend> is empty
+ *
+ * Issues at the <form> level:
+ *
+ *   form-no-submit               form has no <button>,
+ *                                <input type="submit">, or
+ *                                <input type="image">
+ *   form-native-validation       form lacks novalidate and contains at
+ *                                least one field with constraint-
+ *                                validation triggers; browser bubble
+ *                                messages are inaccessible
+ *
+ * Filter bar: All / Issues / Unlabeled / Required problems / Invalid
+ * wiring / Radio groups / No autocomplete / Wrapping labels / Layout
+ * (magnifier) / Native validation / Per-form.
+ * ==================================================================== */
+
+function scanForms() {
+  "use strict";
+  try {
+
+    /* ----- helpers ----- */
+
+    function txt(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        if (!win) return false;
+        var st = win.getComputedStyle(el);
+        return st.display === "none" || st.visibility === "hidden";
+      } catch (e) { return false; }
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/(["\\])/g, "\\$1"); }
+      function idUnique(id) {
+        try { return root.querySelectorAll && root.querySelectorAll("#" + esc(id)).length === 1; }
+        catch (e) { return false; }
+      }
+      if (el.id && idUnique(el.id)) return "#" + esc(el.id);
+      var parts = [];
+      var cur = el;
+      var hops = 0;
+      while (cur && cur.nodeType === 1 && hops < 30) {
+        var tag = cur.tagName.toLowerCase();
+        if (cur !== el && cur.id && idUnique(cur.id)) { parts.unshift("#" + esc(cur.id)); break; }
+        var part = tag;
+        var parent = cur.parentElement;
+        if (parent) {
+          var sibs = Array.prototype.filter.call(parent.children, function (c) { return c.tagName === cur.tagName; });
+          if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+          parts.unshift(part);
+          cur = parent;
+        } else { parts.unshift(part); break; }
+        hops++;
+      }
+      return parts.join(" > ");
+    }
+
+    /* ----- accessible name (subset of the Names algorithm) ----- */
+
+    function nameFromContent(el, seen) {
+      if (!el || seen.has(el)) return "";
+      seen.add(el);
+      var parts = [];
+      for (var n = el.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType === 3) parts.push(n.nodeValue);
+        else if (n.nodeType === 1) {
+          if (isHidden(n)) continue;
+          var aLab = n.getAttribute && n.getAttribute("aria-labelledby");
+          if (aLab) { parts.push(refNames(aLab, n, seen)); continue; }
+          var aL = n.getAttribute && n.getAttribute("aria-label");
+          if (aL && aL.trim()) { parts.push(aL); continue; }
+          if (n.tagName === "IMG") { var alt = n.getAttribute("alt"); if (alt) parts.push(alt); continue; }
+          if (n.tagName === "INPUT") {
+            var t = (n.getAttribute("type") || "text").toLowerCase();
+            if (t === "button" || t === "submit" || t === "reset") { if (n.value) parts.push(n.value); }
+            else if (t === "image" && n.alt) parts.push(n.alt);
+            continue;
+          }
+          parts.push(nameFromContent(n, seen));
+        }
+      }
+      return txt(parts.join(" "));
+    }
+
+    function refNames(idrefs, contextEl, seen) {
+      var doc = contextEl.ownerDocument || document;
+      var root = contextEl.getRootNode ? contextEl.getRootNode() : doc;
+      return idrefs.split(/\s+/).map(function (id) {
+        var ref = (root.getElementById && root.getElementById(id)) || doc.getElementById(id);
+        if (!ref) return "";
+        var aL = ref.getAttribute("aria-label");
+        if (aL && aL.trim()) return aL.trim();
+        return nameFromContent(ref, seen);
+      }).filter(Boolean).join(" ");
+    }
+
+    function accName(el) {
+      var seen = new Set();
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      var sources = [];
+
+      var aLab = el.getAttribute("aria-labelledby");
+      if (aLab) {
+        var n1 = refNames(aLab, el, seen);
+        if (n1) return { name: n1, src: "aria-labelledby", sources: [aLab] };
+      }
+      var aL = el.getAttribute("aria-label");
+      if (aL && aL.trim()) return { name: aL.trim(), src: "aria-label", sources: [aL.trim()] };
+
+      var tag = el.tagName.toLowerCase();
+      if (tag === "input" || tag === "select" || tag === "textarea" || tag === "meter" || tag === "progress") {
+        // Label[for]
+        if (el.id) {
+          var sel;
+          try { sel = 'label[for="' + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id.replace(/"/g, '\\"')) + '"]'; } catch (e) { sel = ""; }
+          if (sel) {
+            var labs = root.querySelectorAll ? root.querySelectorAll(sel) : doc.querySelectorAll(sel);
+            if (labs && labs.length) {
+              var collectedNames = [];
+              Array.prototype.forEach.call(labs, function (lab) {
+                var t = nameFromContent(lab, new Set(seen));
+                if (t) collectedNames.push(t);
+              });
+              if (collectedNames.length) {
+                return { name: collectedNames.join(" "), src: "label[for]", sources: collectedNames, labelCount: labs.length };
+              }
+            }
+          }
+        }
+        // Wrapping label
+        var wrap = el.closest && el.closest("label");
+        if (wrap) {
+          var n3 = nameFromContent(wrap, seen);
+          if (n3) return { name: n3, src: "wrapping <label>", sources: [n3], wrappingLabel: wrap };
+        }
+        if (tag === "input") {
+          var t2 = (el.getAttribute("type") || "text").toLowerCase();
+          if (t2 === "button" || t2 === "submit" || t2 === "reset") {
+            if (el.value) return { name: el.value, src: "value", sources: [el.value] };
+            if (t2 === "submit") return { name: "Submit", src: "default (submit)", sources: [] };
+            if (t2 === "reset") return { name: "Reset", src: "default (reset)", sources: [] };
+          }
+          if (t2 === "image" && el.getAttribute("alt")) return { name: el.getAttribute("alt"), src: "alt", sources: [el.getAttribute("alt")] };
+        }
+      }
+
+      if (tag === "button") {
+        var n5 = nameFromContent(el, seen);
+        if (n5) return { name: n5, src: "subtree text", sources: [n5] };
+      }
+
+      var ti = el.getAttribute("title");
+      if (ti && ti.trim()) return { name: ti.trim(), src: "title", sources: [ti.trim()] };
+
+      var ph = el.getAttribute("placeholder");
+      if (ph && ph.trim()) return { name: ph.trim(), src: "placeholder", sources: [ph.trim()] };
+
+      return { name: "", src: "", sources: [] };
+    }
+
+    /* ----- find associated label(s) — element references, not text ----- */
+
+    function findLabels(el) {
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      var labels = [];
+
+      // label[for=id]
+      if (el.id) {
+        try {
+          var esc = window.CSS && CSS.escape ? CSS.escape(el.id) : el.id.replace(/"/g, '\\"');
+          var ls = (root.querySelectorAll && root.querySelectorAll('label[for="' + esc + '"]')) || doc.querySelectorAll('label[for="' + esc + '"]');
+          Array.prototype.forEach.call(ls, function (l) { labels.push({ el: l, kind: "for", forValue: el.id }); });
+        } catch (e) {}
+      }
+      // wrapping <label>
+      var wrap = el.closest && el.closest("label");
+      if (wrap) {
+        // Skip if same label was already counted via label[for]
+        var already = labels.some(function (l) { return l.el === wrap; });
+        if (!already) {
+          var hasFor = wrap.hasAttribute("for");
+          var forMatches = hasFor && wrap.getAttribute("for") === el.id;
+          labels.push({ el: wrap, kind: forMatches ? "for-and-wrap" : "wrap-implicit", forValue: hasFor ? wrap.getAttribute("for") : null });
+        }
+      }
+      return labels;
+    }
+
+    /* ----- autocomplete validation ----- */
+
+    // HTML spec autofill detail tokens (selected core set — enough to flag
+    // the common usages; the spec also defines section-* prefixes which
+    // we accept structurally rather than enumerate).
+    var AUTOCOMPLETE_TOKENS = new Set((
+      "on off " +
+      "name honorific-prefix given-name additional-name family-name honorific-suffix nickname " +
+      "username new-password current-password one-time-code " +
+      "organization-title organization " +
+      "street-address address-line1 address-line2 address-line3 " +
+      "address-level1 address-level2 address-level3 address-level4 " +
+      "country country-name postal-code " +
+      "cc-name cc-given-name cc-additional-name cc-family-name " +
+      "cc-number cc-exp cc-exp-month cc-exp-year cc-csc cc-type " +
+      "transaction-currency transaction-amount " +
+      "language bday bday-day bday-month bday-year sex " +
+      "tel tel-country-code tel-national tel-area-code tel-local " +
+      "tel-local-prefix tel-local-suffix tel-extension " +
+      "email impp url photo " +
+      "webauthn"
+    ).split(/\s+/));
+    var AUTOCOMPLETE_MODIFIERS = new Set("shipping billing home work mobile fax pager".split(/\s+/));
+
+    function validateAutocomplete(raw) {
+      if (raw === null) return { present: false };
+      var v = raw.trim();
+      if (v === "") return { present: true, raw: raw, valid: false, error: "empty value" };
+      var tokens = v.toLowerCase().split(/\s+/);
+      // Allow optional "section-foo" prefix
+      var i = 0;
+      if (tokens[i] && /^section-[a-z0-9-]+$/.test(tokens[i])) i++;
+      // Optional shipping/billing modifier
+      if (tokens[i] && (tokens[i] === "shipping" || tokens[i] === "billing")) i++;
+      // Optional contact modifier (home/work/etc.)
+      if (tokens[i] && AUTOCOMPLETE_MODIFIERS.has(tokens[i])) i++;
+      // The field token
+      if (!tokens[i]) return { present: true, raw: raw, valid: false, error: "missing field token" };
+      var fieldTok = tokens[i++];
+      if (!AUTOCOMPLETE_TOKENS.has(fieldTok)) {
+        return { present: true, raw: raw, valid: false, error: 'unknown autofill token "' + fieldTok + '"' };
+      }
+      // Allow trailing "webauthn"
+      if (i < tokens.length && tokens[i] === "webauthn") i++;
+      if (i < tokens.length) {
+        return { present: true, raw: raw, valid: false, error: 'unexpected trailing token "' + tokens[i] + '"' };
+      }
+      return { present: true, raw: raw, valid: true, fieldToken: fieldTok };
+    }
+
+    /* ----- heuristic: which inputs SHOULD have autocomplete ----- */
+
+    function suggestAutocomplete(el, accName, visibleLabelText) {
+      var tag = el.tagName.toLowerCase();
+      if (tag !== "input" && tag !== "select" && tag !== "textarea") return null;
+      var inputType = (el.getAttribute("type") || "text").toLowerCase();
+      if (inputType === "hidden" || inputType === "button" || inputType === "submit" ||
+          inputType === "reset" || inputType === "image" || inputType === "file") return null;
+
+      var hints = [
+        (el.getAttribute("name") || "").toLowerCase(),
+        (el.getAttribute("id") || "").toLowerCase(),
+        (el.getAttribute("autocomplete") || "").toLowerCase(),
+        (accName || "").toLowerCase(),
+        (visibleLabelText || "").toLowerCase()
+      ].join(" ");
+
+      if (inputType === "email" || /\b(e-?mail|email-?addr)/.test(hints)) return "email";
+      if (inputType === "tel"   || /\b(phone|telephone|mobile|cell|tel-?num)\b/.test(hints)) return "tel";
+      if (inputType === "url"   || /\b(homepage|website|url)\b/.test(hints)) return "url";
+      if (/\b(first[-\s]?name|given[-\s]?name|forename|fname)\b/.test(hints)) return "given-name";
+      if (/\b(last[-\s]?name|family[-\s]?name|surname|lname)\b/.test(hints)) return "family-name";
+      if (/\b(full[-\s]?name|your name|^name$|customer[-\s]?name)\b/.test(hints)) return "name";
+      if (/\b(organization|company|employer|workplace)\b/.test(hints)) return "organization";
+      if (/\b(street|address[-\s]?line|address1|street[-\s]?addr)\b/.test(hints)) return "street-address";
+      if (/\b(city|town|locality|address[-\s]?level2)\b/.test(hints)) return "address-level2";
+      if (/\b(state|province|region|address[-\s]?level1)\b/.test(hints)) return "address-level1";
+      if (/\b(zip|postal[-\s]?code|post[-\s]?code)\b/.test(hints)) return "postal-code";
+      if (/\b(country)\b/.test(hints)) return "country";
+      if (/\b(birth[-\s]?day|birthday|d[-\s]?o[-\s]?b|date[-\s]?of[-\s]?birth)\b/.test(hints)) return "bday";
+      if (/\b(card[-\s]?number|cc[-\s]?num|credit[-\s]?card)\b/.test(hints)) return "cc-number";
+      if (/\b(security[-\s]?code|cvv|cvc|cv2)\b/.test(hints)) return "cc-csc";
+      if (/\b(username|user[-\s]?name|login)\b/.test(hints)) return "username";
+      if (/\b(password|passwd)\b/.test(hints)) {
+        if (/\b(new|create|confirm|re-?enter|repeat)\b/.test(hints)) return "new-password";
+        return "current-password";
+      }
+      return null;
+    }
+
+    /* ----- required-indicator detection ----- */
+
+    function hasRequiredIndicator(controlEl, labelEls) {
+      // Search the associated label text for "*" or "required"
+      for (var i = 0; i < labelEls.length; i++) {
+        var lt = (labelEls[i].el.textContent || "").trim();
+        if (lt.indexOf("*") !== -1) return { found: true, where: "label", text: "*" };
+        if (/\brequired\b/i.test(lt)) return { found: true, where: "label", text: "required" };
+        if (/\boptional\b/i.test(lt)) continue; // optional indicator doesn't count for required
+      }
+      // Search siblings to the right of the input for a short text/span
+      // containing "*" or "required" (catches the [input] * pattern)
+      try {
+        var parent = controlEl.parentElement;
+        if (!parent) return { found: false };
+        var rect = controlEl.getBoundingClientRect();
+        // Look at next siblings of the input
+        var sib = controlEl.nextSibling;
+        while (sib) {
+          if (sib.nodeType === 3) {
+            if (sib.nodeValue.indexOf("*") !== -1) return { found: true, where: "after-input text", text: "*" };
+            if (/\brequired\b/i.test(sib.nodeValue)) return { found: true, where: "after-input text", text: "required" };
+          } else if (sib.nodeType === 1) {
+            var t = (sib.textContent || "").trim();
+            if (t.length <= 40) {  // keep it tight — don't match whole paragraphs
+              if (t.indexOf("*") !== -1) return { found: true, where: "after-input element", text: "*" };
+              if (/\brequired\b/i.test(t)) return { found: true, where: "after-input element", text: "required" };
+            }
+            // Stop if we've scanned past a clear block break
+            try {
+              var sibStyle = window.getComputedStyle(sib);
+              if (sibStyle.display === "block" || sibStyle.display === "flex" || sibStyle.display === "grid") break;
+            } catch (e) {}
+          }
+          sib = sib.nextSibling;
+        }
+      } catch (e) {}
+      return { found: false };
+    }
+
+    /* ----- label position relative to input ----- */
+
+    function classifyLabelPosition(controlEl, labelEl) {
+      // Wrapping label is treated specially — the input is INSIDE the label
+      if (labelEl.contains && labelEl.contains(controlEl) && labelEl !== controlEl) {
+        // Walk to find the first text node inside the label that precedes the input
+        // to determine where the label text sits relative to the input
+        try {
+          var labelRect = labelEl.getBoundingClientRect();
+          var inputRect = controlEl.getBoundingClientRect();
+          if (labelRect.bottom <= inputRect.top + 4) return "above-wrapping";
+          if (labelRect.top >= inputRect.bottom - 4) return "below-wrapping";
+          return "wrapping-mixed";
+        } catch (e) { return "wrapping-unknown"; }
+      }
+      try {
+        var lr = labelEl.getBoundingClientRect();
+        var ir = controlEl.getBoundingClientRect();
+        // Tolerances
+        var V_GAP = 4;   // px slack for "above"/"below"
+        var H_LEFT_ALIGN = 10;  // px max difference between label.left and input.left
+        // Above
+        if (lr.bottom <= ir.top + V_GAP) {
+          if (Math.abs(lr.left - ir.left) <= H_LEFT_ALIGN) return "above-left-aligned";
+          return "above-not-left-aligned";
+        }
+        // Below
+        if (lr.top >= ir.bottom - V_GAP) return "below";
+        // Side
+        if (lr.right <= ir.left + V_GAP) return "left-side";
+        if (lr.left >= ir.right - V_GAP) return "right-side";
+        // Overlapping but neither clearly above/below/left/right
+        return "overlapping";
+      } catch (e) { return "unknown"; }
+    }
+
+    /* ----- collect form controls ----- */
+
+    var SELECTOR = [
+      'input:not([type="hidden"])', "select", "textarea", "button",
+      '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]',
+      '[role="checkbox"]', '[role="radio"]', '[role="switch"]',
+      '[role="slider"]', '[role="spinbutton"]'
+    ].join(",");
+
+    var allControls = [];
+    var seenControls = new Set();
+    var shadowRoots = 0;
+
+    function walk(root) {
+      var matches;
+      try { matches = root.querySelectorAll(SELECTOR); } catch (e) { return; }
+      Array.prototype.forEach.call(matches, function (el) {
+        if (seenControls.has(el)) return;
+        seenControls.add(el);
+        if (isHidden(el)) return;
+        var r;
+        try { r = el.getBoundingClientRect(); } catch (e) { return; }
+        // 0×0 may be sr-only / virtual; skip unless it's a button (which can be off-screen but meaningful)
+        if (r.width === 0 && r.height === 0 && el.tagName.toLowerCase() !== "button") return;
+        allControls.push({ el: el, rect: r });
+      });
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      Array.prototype.forEach.call(all, function (el) {
+        if (el.shadowRoot) { shadowRoots++; walk(el.shadowRoot); }
+      });
+    }
+
+    walk(document);
+
+    /* ----- group radios/checkboxes by [form, name] ----- */
+
+    var groupsByKey = new Map();
+    allControls.forEach(function (c) {
+      var el = c.el;
+      var tag = el.tagName.toLowerCase();
+      var type = (el.getAttribute("type") || "").toLowerCase();
+      if (tag !== "input" || (type !== "radio" && type !== "checkbox")) return;
+      var name = el.getAttribute("name");
+      if (!name) return;
+      var form = el.form || null;
+      var key = (form ? "form" + (form.id || "X") : "noform") + "|" + name + "|" + type;
+      if (!groupsByKey.has(key)) groupsByKey.set(key, { name: name, type: type, form: form, members: [] });
+      groupsByKey.get(key).members.push(c);
+    });
+
+    // For each group with >1 member, check if wrapped in a <fieldset> with <legend>
+    // or a [role=group][aria-labelledby] / [aria-label]
+    function isGroupedProperly(members) {
+      // All members must share an ancestor that's a <fieldset> with a <legend>,
+      // OR a [role=group] / [role=radiogroup] with an accessible name.
+      // We check the FIRST member's ancestors and verify all others are inside.
+      var first = members[0].el;
+      var cur = first.parentElement;
+      while (cur) {
+        var tag = cur.tagName.toLowerCase();
+        if (tag === "fieldset") {
+          // Does every member share this fieldset as an ancestor?
+          var allInside = members.every(function (m) { return cur.contains(m.el); });
+          if (allInside) {
+            var legend = cur.querySelector(":scope > legend");
+            return { grouped: true, fieldset: cur, legend: legend, legendText: legend ? txt(legend.textContent) : "" };
+          }
+        }
+        if (cur.getAttribute && (cur.getAttribute("role") === "group" || cur.getAttribute("role") === "radiogroup")) {
+          var allInside2 = members.every(function (m) { return cur.contains(m.el); });
+          if (allInside2) {
+            var n = accName(cur);
+            return { grouped: true, role: cur.getAttribute("role"), accName: n.name, accNameSrc: n.src };
+          }
+        }
+        cur = cur.parentElement;
+      }
+      return { grouped: false };
+    }
+
+    var groupResults = [];
+    groupsByKey.forEach(function (g, key) {
+      if (g.members.length < 2) return;
+      var info = isGroupedProperly(g.members);
+      groupResults.push({
+        key: key,
+        type: g.type,
+        name: g.name,
+        formId: g.form ? (g.form.id || g.form.name || null) : null,
+        memberSelectors: g.members.map(function (m) { return uniqueSelector(m.el); }),
+        info: info
+      });
+    });
+
+    /* ----- detect multi-control rows for magnifier flag ----- */
+    // Two controls are in the same row if their vertical centres are within
+    // half the smaller height.
+
+    function sameRow(a, b) {
+      var ay = (a.rect.top + a.rect.bottom) / 2;
+      var by = (b.rect.top + b.rect.bottom) / 2;
+      var minH = Math.min(a.rect.height, b.rect.height);
+      if (minH <= 0) return false;
+      return Math.abs(ay - by) <= minH * 0.5;
+    }
+
+    // Sort by vertical position
+    var sortedByY = allControls.slice().sort(function (a, b) {
+      return a.rect.top - b.rect.top || a.rect.left - b.rect.left;
+    });
+
+    // Mark each control with its row members (excluding self)
+    var rowMembers = new Map(); // controlEl → array of other controlEls in same row
+    for (var i = 0; i < sortedByY.length; i++) {
+      var ai = sortedByY[i];
+      var row = [];
+      for (var j = 0; j < sortedByY.length; j++) {
+        if (i === j) continue;
+        var bj = sortedByY[j];
+        if (sameRow(ai, bj)) row.push(bj.el);
+      }
+      if (row.length) rowMembers.set(ai.el, row);
+    }
+
+    /* ----- main per-control analysis ----- */
+
+    var results = [];
+    allControls.forEach(function (c, idx) {
+      var el = c.el;
+      var tag = el.tagName.toLowerCase();
+      var type = (el.getAttribute("type") || "").toLowerCase();
+
+      var labels = findLabels(el);
+      var name = accName(el);
+      var visibleLabelText = labels.length ? txt(labels[0].el.textContent) : "";
+      var requiredAttr = el.hasAttribute("required");
+      var ariaRequired = el.getAttribute("aria-required");
+      var disabledAttr = el.hasAttribute("disabled");
+      var ariaDisabled = el.getAttribute("aria-disabled") === "true";
+      var readonlyAttr = el.hasAttribute("readonly");
+      var ariaInvalid = el.getAttribute("aria-invalid");
+      var describedby = el.getAttribute("aria-describedby");
+      var errormessage = el.getAttribute("aria-errormessage");
+      var autocompleteRaw = el.getAttribute("autocomplete");
+      var autocompleteResult = validateAutocomplete(autocompleteRaw);
+      var autocompleteSuggestion = suggestAutocomplete(el, name.name, visibleLabelText);
+
+      var form = el.form || null;
+
+      var issues = [];
+
+      // --- Label / name ---
+      if (!name.name) {
+        issues.push({ category: "unlabeled", text: "no accessible name (no label, aria-label, aria-labelledby, or title)" });
+      } else if (name.src === "placeholder") {
+        issues.push({ category: "placeholder-as-label", text: "accessible name comes only from placeholder — placeholder text disappears when typing and isn't a substitute for a label" });
+      }
+
+      // Label-in-name (WCAG 2.5.3): visible label should be contained in accname
+      if (visibleLabelText && name.name) {
+        var vl = visibleLabelText.toLowerCase().replace(/[\s ]+/g, " ").trim();
+        var an = name.name.toLowerCase().replace(/[\s ]+/g, " ").trim();
+        if (vl && an && an.indexOf(vl) === -1) {
+          issues.push({
+            category: "label-in-name-mismatch",
+            text: 'visible label "' + visibleLabelText + '" is not contained in accessible name "' + name.name + '" — voice-control users say what they see, but the AT API receives different text'
+          });
+        }
+      }
+
+      // Wrapping label without for=
+      labels.forEach(function (l) {
+        if (l.kind === "wrap-implicit") {
+          issues.push({
+            category: "wrapping-label-implicit",
+            text: '<label> wraps the control but has no for="id" attribute — works in most screen readers but Dragon NaturallySpeaking and some other voice-control tools need explicit for=id'
+          });
+        }
+      });
+
+      // Multiple labels
+      var forLabels = labels.filter(function (l) { return l.kind === "for" || l.kind === "for-and-wrap"; });
+      if (forLabels.length > 1) {
+        issues.push({
+          category: "multiple-labels",
+          text: forLabels.length + ' <label for="' + el.id + '"> elements point at this control; only the first is reliably used by AT'
+        });
+      }
+
+      // --- Label position ---
+      if (labels.length) {
+        var labelEl = labels[0].el;
+        var pos = classifyLabelPosition(el, labelEl);
+        if (pos === "above-not-left-aligned") {
+          issues.push({
+            category: "label-not-left-aligned",
+            text: "label is above the input but not left-aligned with it — magnifier users following a horizontal magnification band can lose the label"
+          });
+        } else if (pos === "left-side" || pos === "right-side") {
+          issues.push({
+            category: "label-side-positioned",
+            text: "label sits to the " + (pos === "left-side" ? "left" : "right") + " of the input — magnifier users may not see the label when zoomed in on the input"
+          });
+        } else if (pos === "below" || pos === "below-wrapping") {
+          issues.push({
+            category: "label-below-input",
+            text: "label is below the input — users (especially magnifier users and AT) generally expect the label above"
+          });
+        }
+      }
+
+      // --- Multi-control row ---
+      if (rowMembers.has(el)) {
+        var otherEls = rowMembers.get(el);
+        issues.push({
+          category: "multi-control-row",
+          text: "this control shares a horizontal row with " + otherEls.length + " other form control" + (otherEls.length === 1 ? "" : "s") + " — magnifier users following a single horizontal band have to scroll back and forth"
+        });
+      }
+
+      // --- Required indicator ---
+      var isRequired = requiredAttr || ariaRequired === "true";
+      var hasVisIndicator = hasRequiredIndicator(el, labels);
+      if (isRequired && !hasVisIndicator.found) {
+        issues.push({
+          category: "required-no-visible-indicator",
+          text: 'control is required (required=' + (requiredAttr ? "yes" : "no") + ', aria-required=' + (ariaRequired || "none") + ') but the label has no visible "*" or "required" text'
+        });
+      } else if (!isRequired && hasVisIndicator.found) {
+        issues.push({
+          category: "required-indicator-no-attr",
+          text: 'label/text near the input shows "' + hasVisIndicator.text + '" but the input has no required attribute or aria-required="true" — browser validation and AT won\'t treat it as required'
+        });
+      }
+
+      // required / aria-required consistency
+      if (requiredAttr && ariaRequired === "false") {
+        issues.push({
+          category: "required-aria-contradiction",
+          text: 'required attribute present but aria-required="false" — contradictory'
+        });
+      } else if (requiredAttr && !ariaRequired) {
+        issues.push({
+          category: "required-no-aria-required",
+          text: 'required attribute set but no aria-required — best practice to set both (some AT picks up the HTML attribute, some doesn\'t)'
+        });
+      }
+
+      // --- IDREF validation (aria-describedby / aria-errormessage / aria-labelledby) ---
+      var doc = el.ownerDocument || document;
+      var root = el.getRootNode ? el.getRootNode() : doc;
+      function checkIdRef(attrName, value) {
+        if (!value) return;
+        var ids = value.trim().split(/\s+/);
+        var missing = ids.filter(function (id) {
+          var ref = (root.getElementById && root.getElementById(id)) || doc.getElementById(id);
+          return !ref;
+        });
+        if (missing.length) {
+          issues.push({
+            category: "bad-idref",
+            text: attrName + ' references non-existent ID' + (missing.length > 1 ? "s" : "") + ": " + missing.map(function (i) { return '"' + i + '"'; }).join(", ")
+          });
+        }
+      }
+      checkIdRef("aria-describedby", describedby);
+      checkIdRef("aria-errormessage", errormessage);
+      checkIdRef("aria-labelledby", el.getAttribute("aria-labelledby"));
+      checkIdRef("aria-controls", el.getAttribute("aria-controls"));
+
+      // aria-invalid="true" with no described-by / errormessage
+      if (ariaInvalid === "true" && !describedby && !errormessage) {
+        issues.push({
+          category: "invalid-no-error-ref",
+          text: 'aria-invalid="true" set but the control has no aria-describedby or aria-errormessage pointing to an error message'
+        });
+      }
+
+      // --- Autocomplete ---
+      if (autocompleteResult.present && !autocompleteResult.valid) {
+        issues.push({
+          category: "invalid-autocomplete",
+          text: 'autocomplete="' + autocompleteRaw + '" is invalid: ' + autocompleteResult.error
+        });
+      }
+      if (!autocompleteResult.present && autocompleteSuggestion) {
+        issues.push({
+          category: "missing-autocomplete",
+          text: 'looks like it collects personal info; consider autocomplete="' + autocompleteSuggestion + '" (WCAG 1.3.5 Identify Input Purpose)'
+        });
+      }
+
+      // --- aria-disabled on focusable ---
+      if (ariaDisabled && !disabledAttr) {
+        // aria-disabled doesn't remove from tab order unless tabindex=-1 is also set
+        var tabidx = el.getAttribute("tabindex");
+        var stillFocusable = tabidx === null || (tabidx !== "" && parseInt(tabidx, 10) >= 0);
+        if (stillFocusable) {
+          issues.push({
+            category: "aria-disabled-focusable",
+            text: 'aria-disabled="true" but the element is still in the tab order — keyboard users can focus a control that appears disabled. Add tabindex="-1" or use the disabled attribute instead.'
+          });
+        }
+      }
+
+      // --- <input type="image"> alt ---
+      if (tag === "input" && type === "image" && !el.getAttribute("alt")) {
+        issues.push({
+          category: "image-input-no-alt",
+          text: '<input type="image"> has no alt attribute'
+        });
+      }
+
+      // --- Group membership flag (attached per member) ---
+      // We compute this here so each radio/checkbox shows whether its group is properly fielded.
+      if (tag === "input" && (type === "radio" || type === "checkbox") && el.name) {
+        var key = (form ? "form" + (form.id || "X") : "noform") + "|" + el.name + "|" + type;
+        var g = groupsByKey.get(key);
+        if (g && g.members.length >= 2) {
+          var info = isGroupedProperly(g.members);
+          if (!info.grouped) {
+            issues.push({
+              category: "group-no-fieldset",
+              text: g.members.length + ' ' + (type === "radio" ? "radio buttons" : "checkboxes") + ' share name="' + el.name + '" but are not wrapped in a <fieldset>+<legend> or a [role="group"] with an accessible name'
+            });
+          } else if (info.fieldset && info.legend) {
+            if (!info.legendText) {
+              issues.push({
+                category: "empty-legend",
+                text: "the <fieldset> wrapping this group has an empty <legend>"
+              });
+            }
+          }
+        }
+      }
+
+      results.push({
+        domIndex: idx + 1,
+        tag: tag,
+        type: type || null,
+        nameAttr: el.getAttribute("name") || null,
+        idAttr: el.id || null,
+        accName: name.name,
+        accNameSrc: name.src,
+        visibleLabelText: visibleLabelText,
+        labels: labels.map(function (l) { return { kind: l.kind, forValue: l.forValue, labelText: txt(l.el.textContent), labelSelector: uniqueSelector(l.el) }; }),
+        required: requiredAttr,
+        ariaRequired: ariaRequired,
+        disabled: disabledAttr,
+        ariaDisabled: ariaDisabled,
+        readonly: readonlyAttr,
+        ariaInvalid: ariaInvalid,
+        describedby: describedby,
+        errormessage: errormessage,
+        autocomplete: autocompleteRaw,
+        autocompleteValid: autocompleteResult.valid,
+        autocompleteError: autocompleteResult.error || null,
+        autocompleteSuggestion: autocompleteSuggestion,
+        formId: form ? (form.id || form.name || null) : null,
+        formIndex: form ? (Array.prototype.indexOf.call(document.forms, form) + 1) : null,
+        sampleValue: tag === "input" || tag === "textarea" ? (el.value || "").slice(0, 60) : "",
+        placeholder: el.getAttribute("placeholder") || null,
+        rowMembersCount: rowMembers.has(el) ? rowMembers.get(el).length : 0,
+        issues: issues,
+        selector: uniqueSelector(el),
+        rect: { top: c.rect.top, left: c.rect.left, width: c.rect.width, height: c.rect.height }
+      });
+    });
+
+    /* ----- per-form issues ----- */
+
+    var formResults = [];
+    Array.prototype.forEach.call(document.forms, function (form, fi) {
+      var formIssues = [];
+      // No submit button?
+      var hasSubmit = !!form.querySelector('button:not([type="reset"]):not([type="button"]), input[type="submit"], input[type="image"], button[type="submit"]');
+      if (!hasSubmit) {
+        formIssues.push({
+          category: "form-no-submit",
+          text: 'form has no <button>, <input type="submit">, or <input type="image"> — may be submitted via JS only; verify keyboard submission works'
+        });
+      }
+      // Native validation
+      var novalidate = form.hasAttribute("novalidate");
+      var validatingFields = [];
+      if (!novalidate) {
+        Array.prototype.forEach.call(form.querySelectorAll("input, select, textarea"), function (f) {
+          var t = (f.getAttribute("type") || "text").toLowerCase();
+          if (t === "hidden" || t === "submit" || t === "button" || t === "reset" || t === "image") return;
+          if (f.hasAttribute("required") ||
+              f.hasAttribute("pattern") ||
+              t === "email" || t === "url" ||
+              ((t === "number" || t === "range") && (f.hasAttribute("min") || f.hasAttribute("max") || f.hasAttribute("step"))) ||
+              f.hasAttribute("minlength") || f.hasAttribute("maxlength")) {
+            validatingFields.push({
+              tag: f.tagName.toLowerCase(),
+              name: f.getAttribute("name") || f.id || "",
+              type: t,
+              selector: uniqueSelector(f)
+            });
+          }
+        });
+        if (validatingFields.length) {
+          formIssues.push({
+            category: "form-native-validation",
+            text: 'form lacks novalidate attribute and has ' + validatingFields.length + ' field(s) with constraint-validation triggers (required/pattern/email/url/min/max/minlength/maxlength). On invalid submit the browser shows bubble messages that auto-dismiss with no user control, position off-screen at high magnification, and are inconsistently announced by screen readers. Add novalidate and implement custom accessible validation.',
+            validatingFields: validatingFields
+          });
+        }
+      }
+
+      formResults.push({
+        formIndex: fi + 1,
+        formId: form.id || null,
+        formName: form.getAttribute("name") || null,
+        formAction: form.getAttribute("action") || null,
+        formMethod: form.getAttribute("method") || null,
+        novalidate: novalidate,
+        controlCount: results.filter(function (r) { return r.formIndex === fi + 1; }).length,
+        issues: formIssues,
+        selector: uniqueSelector(form)
+      });
+    });
+
+    return {
+      url: window.location.href,
+      isTop: window === window.top,
+      controls: results,
+      forms: formResults,
+      groups: groupResults,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return { url: window.location.href, isTop: window === window.top, error: String(e && e.message || e) };
+  }
+}
+
+function displayForms(framesData, checkId) {
+  "use strict";
+  var P = "__a11yn_ext_";
+  if (window[P + "cleanup"]) window[P + "cleanup"]();
+  try {
+
+  /* ----- aggregate from frames ----- */
+
+  var iframes = Array.prototype.slice.call(document.querySelectorAll("iframe, frame"));
+  var iframeByUrl = new Map();
+  iframes.forEach(function (f) {
+    var url = "";
+    try {
+      if (f.contentWindow && f.contentWindow.location && f.contentWindow.location.href !== "about:blank") {
+        url = f.contentWindow.location.href;
+      }
+    } catch (e) {}
+    if (!url && f.src) url = f.src;
+    if (url && !iframeByUrl.has(url)) iframeByUrl.set(url, f);
+  });
+
+  // Each frame contributes its own forms and controls. We tag each with the frame label.
+  var allControls = [];
+  var allForms = [];
+  var unmatchedFrames = 0;
+  var frameLabelByUrl = new Map();
+  framesData.forEach(function (frame) {
+    if (!frame || frame.error) return;
+    var inFrame = !frame.isTop;
+    var offX = 0, offY = 0, positioned = true;
+    if (inFrame) {
+      var iframe = iframeByUrl.get(frame.url);
+      if (iframe) { var ir = iframe.getBoundingClientRect(); offX = ir.left; offY = ir.top; }
+      else { positioned = false; unmatchedFrames++; }
+    }
+    if (inFrame) {
+      try { var u = new URL(frame.url); frameLabelByUrl.set(frame.url, u.hostname + u.pathname.replace(/\/$/, "")); }
+      catch (e) { frameLabelByUrl.set(frame.url, frame.url); }
+    }
+    var frameLabel = inFrame ? frameLabelByUrl.get(frame.url) : null;
+
+    (frame.forms || []).forEach(function (f) {
+      allForms.push(Object.assign({}, f, {
+        frameUrl: frame.url, frameLabel: frameLabel, isTop: !inFrame
+      }));
+    });
+    (frame.controls || []).forEach(function (c) {
+      allControls.push(Object.assign({}, c, {
+        frameUrl: frame.url, frameLabel: frameLabel, isTop: !inFrame,
+        pageTop: window.scrollY + offY + c.rect.top,
+        pageLeft: window.scrollX + offX + c.rect.left,
+        positioned: positioned,
+        iframeEl: inFrame ? iframeByUrl.get(frame.url) || null : null,
+        _resolveEl: null
+      }));
+    });
+  });
+
+  // Assign a stable display index across frames
+  allControls.forEach(function (c, i) { c.displayIndex = i + 1; });
+
+  // Resolve element refs for outline + click-to-scroll
+  allControls.forEach(function (r) {
+    var doc;
+    if (r.isTop) doc = document;
+    else if (r.iframeEl) { try { doc = r.iframeEl.contentDocument; } catch (e) { doc = null; } }
+    if (!doc) return;
+    try {
+      var el = doc.querySelector(r.selector);
+      if (el) {
+        r._resolveEl = el;
+        var hasErr = r.issues.some(function (i) { return i.category === "unlabeled" || i.category === "bad-idref" || i.category === "required-aria-contradiction" || i.category === "invalid-autocomplete" || i.category === "image-input-no-alt" || i.category === "group-no-fieldset" || i.category === "invalid-no-error-ref"; });
+        var hasWarn = r.issues.length > 0 && !hasErr;
+        var color = hasErr ? "#b00020" : hasWarn ? "#b45309" : "#003876";
+        var style = (hasErr || hasWarn) ? "dashed" : "solid";
+        el.style.setProperty("outline", "2px " + style + " " + color, "important");
+        el.style.setProperty("outline-offset", "1px", "important");
+      }
+    } catch (e) {}
+  });
+
+  /* ----- shadow UI ----- */
+
+  var host = document.createElement("div");
+  host.id = P + "host";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "all:initial !important;position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;margin:0 !important;padding:0 !important;border:0 !important;font:400 16px/1.4 ui-sans-serif,system-ui,sans-serif !important;color:#111 !important;pointer-events:none !important;z-index:2147483647 !important;";
+  (document.body || document.documentElement).appendChild(host);
+  var shadow = host.attachShadow({ mode: "closed" });
+
+  var CATEGORY_COLORS = {
+    "unlabeled":                  "#b00020",
+    "placeholder-as-label":       "#b45309",
+    "label-in-name-mismatch":     "#b45309",
+    "wrapping-label-implicit":    "#b45309",
+    "multiple-labels":            "#b45309",
+    "label-not-left-aligned":     "#b45309",
+    "label-side-positioned":      "#b45309",
+    "label-below-input":          "#b45309",
+    "multi-control-row":          "#b45309",
+    "required-no-visible-indicator": "#b45309",
+    "required-indicator-no-attr": "#b45309",
+    "required-aria-contradiction":"#b00020",
+    "required-no-aria-required":  "#7a4a09",
+    "bad-idref":                  "#b00020",
+    "invalid-no-error-ref":       "#b00020",
+    "missing-autocomplete":       "#7a4a09",
+    "invalid-autocomplete":       "#b00020",
+    "aria-disabled-focusable":    "#b45309",
+    "image-input-no-alt":         "#b00020",
+    "group-no-fieldset":          "#b00020",
+    "empty-legend":               "#b00020",
+    "form-no-submit":             "#b45309",
+    "form-native-validation":     "#b45309"
+  };
+
+  var css =
+    ":host{all:initial;font-family:ui-sans-serif,system-ui,sans-serif !important;}" +
+    "*,*::before,*::after{box-sizing:border-box;font-family:ui-sans-serif,system-ui,sans-serif !important;font-style:normal !important;font-weight:400 !important;font-variant:normal !important;text-transform:none !important;letter-spacing:normal !important;text-decoration:none !important;color:#111;}" +
+    ".badge{position:absolute;background:#003876;color:#fff;font-size:16px;font-weight:600 !important;line-height:1.2;padding:4px 8px;border-radius:3px;pointer-events:none;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.4);}" +
+    ".badge.err{background:#b00020;}" +
+    ".badge.warn{background:#b45309;}" +
+    ".badge.frame{filter:saturate(0.7) brightness(0.9);}" +
+    ".panel{position:fixed;top:12px;right:12px;width:640px;max-height:85vh;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:16px;line-height:1.4;pointer-events:auto;}" +
+    ".panel header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#003876;color:#fff;border-radius:6px 6px 0 0;}" +
+    ".panel header strong{font-size:18px;font-weight:600 !important;color:#fff;}" +
+    ".panel .btns{display:flex;gap:8px;}" +
+    ".panel button{background:transparent;border:1px solid #fff;color:#fff;padding:6px 12px;border-radius:3px;cursor:pointer;font-size:16px;font-weight:500;line-height:1.2;}" +
+    ".panel button:hover{background:rgba(255,255,255,.18);}" +
+    ".panel .filterbar{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid #eee;background:#f5f7fa;flex-wrap:wrap;}" +
+    ".panel .filterbar button{border:1px solid #cfd6e0;background:#fff;color:#003876;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:13px;font-weight:500;}" +
+    ".panel .filterbar button.active{background:#003876;color:#fff !important;border-color:#003876;}" +
+    ".panel .filterbar button:hover:not(.active){background:#eef4ff;}" +
+    ".panel .summary{padding:10px 14px;border-bottom:1px solid #eee;background:#f5f7fa;font-size:16px;}" +
+    ".panel .summary .miss{color:#b00020;font-weight:600 !important;}" +
+    ".panel .summary .ok{color:#0a8043;font-weight:600 !important;}" +
+    ".panel .summary .warn{color:#b45309;font-weight:600 !important;}" +
+    ".panel .body{overflow:auto;flex:1 1 auto;}" +
+    ".panel .formsection{border-bottom:2px solid #ddd;}" +
+    ".panel .formsection > .formhead{padding:8px 14px;background:#eef4ff;font-size:14px;font-weight:600 !important;color:#003876;border-top:1px solid #c5d4e8;}" +
+    ".panel .formsection > .formhead .formissues{margin-top:4px;font-size:13px;color:#b00020;font-weight:600 !important;}" +
+    ".panel .formsection > .formhead .formwarn{margin-top:4px;font-size:13px;color:#b45309;font-weight:600 !important;}" +
+    ".panel ol{margin:0;padding:0;list-style:none;}" +
+    ".panel li{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:16px;border-left:4px solid transparent;}" +
+    ".panel li:hover{background:#eef4ff;}" +
+    ".panel li.has-err{border-left-color:#b00020;}" +
+    ".panel li.has-warn{border-left-color:#b45309;}" +
+    ".panel.filter-issues li:not(.has-err):not(.has-warn){display:none;}" +
+    ".panel.filter-unlabeled li:not(.has-unlabeled){display:none;}" +
+    ".panel.filter-required li:not(.has-required-issue){display:none;}" +
+    ".panel.filter-wiring li:not(.has-wiring-issue){display:none;}" +
+    ".panel.filter-radio-groups li:not(.has-group-issue){display:none;}" +
+    ".panel.filter-autocomplete li:not(.has-autocomplete-issue){display:none;}" +
+    ".panel.filter-wrapping li:not(.has-wrapping-issue){display:none;}" +
+    ".panel.filter-layout li:not(.has-layout-issue){display:none;}" +
+    ".panel.filter-validation .formsection:not(.has-form-validation),.panel.filter-validation li{display:none;}" +
+    ".panel.filter-validation .formsection.has-form-validation{display:block;}" +
+    ".panel li .meta{color:#555;font-size:14px;margin-bottom:2px;display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;}" +
+    ".panel li .frame-label{color:#0a5d2e;font-weight:600;}" +
+    ".panel li .accname{font-weight:600 !important;color:#111;font-size:16px;word-break:break-word;}" +
+    ".panel li .accname.empty{color:#b00020;font-style:italic;}" +
+    ".panel li .accsource{color:#666;font-size:13px;font-style:italic;}" +
+    ".panel li .badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;font-size:12px;}" +
+    ".panel li .smallchip{padding:1px 6px;border-radius:3px;background:rgba(0,0,0,.06);color:#333;font-weight:600 !important;}" +
+    ".panel li .smallchip.req{background:#003876;color:#fff !important;}" +
+    ".panel li .smallchip.disabled{background:#888;color:#fff !important;}" +
+    ".panel li .smallchip.readonly{background:#5d4037;color:#fff !important;}" +
+    ".panel li .smallchip.invalid{background:#b00020;color:#fff !important;}" +
+    ".panel li .smallchip.auto{background:#0a5d2e;color:#fff !important;}" +
+    ".panel li .issues{margin-top:6px;font-size:14px;}" +
+    ".panel li .issue{display:flex;gap:6px;margin-top:2px;}" +
+    ".panel li .issue .catchip{flex:0 0 auto;padding:1px 6px;border-radius:3px;color:#fff !important;font-size:11px;font-weight:700 !important;line-height:1.4;}" +
+    ".panel li .issue .text{flex:1 1 auto;font-weight:600 !important;}" +
+    ".panel li .src{color:#666;font-size:14px;font-style:italic;margin-top:3px;word-break:break-all;}" +
+    ".panel code{font-family:ui-monospace,monospace !important;font-size:14px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:3px;}";
+
+  var styleEl = document.createElement("style");
+  styleEl.textContent = css;
+  shadow.appendChild(styleEl);
+
+  /* ----- badges on the page ----- */
+
+  var badges = [];
+  allControls.forEach(function (r) {
+    if (!r.positioned) return;
+    var hasErr = r.issues.some(function (i) {
+      var c = i.category;
+      return c === "unlabeled" || c === "bad-idref" || c === "required-aria-contradiction" ||
+             c === "invalid-autocomplete" || c === "image-input-no-alt" || c === "group-no-fieldset" ||
+             c === "invalid-no-error-ref" || c === "empty-legend";
+    });
+    var hasWarn = r.issues.length > 0 && !hasErr;
+    var badge = document.createElement("div");
+    var cls = "badge";
+    if (hasErr) cls += " err";
+    else if (hasWarn) cls += " warn";
+    if (!r.isTop) cls += " frame";
+    badge.className = cls;
+    var prefix = r.isTop ? "" : "[frame] ";
+    var nameStr = r.accName ? r.accName : "(no name)";
+    badge.textContent = "#" + r.displayIndex + " " + prefix + r.tag + (r.type ? "[" + r.type + "]" : "") + ": " + nameStr;
+    badge.style.top = (r.pageTop - 28) + "px";
+    badge.style.left = r.pageLeft + "px";
+    shadow.appendChild(badge);
+    badges.push(badge);
+    r.badge = badge;
+  });
+
+  /* ----- markdown ----- */
+
+  function mdEsc(s) { return String(s).replace(/\|/g, "\\|").replace(/\n+/g, " "); }
+  var md = "## Forms\n\n";
+  if (allForms.length === 0) {
+    md += "*(no <form> elements; controls listed without form grouping)*\n\n";
+  }
+  allForms.forEach(function (f) {
+    md += "### Form #" + f.formIndex + (f.formId ? ' id="' + mdEsc(f.formId) + '"' : "") + (f.frameLabel ? " in " + mdEsc(f.frameLabel) : "") + "\n\n";
+    f.issues.forEach(function (i) {
+      md += "- ⚠ **" + i.category + "** — " + mdEsc(i.text) + "\n";
+    });
+    if (f.issues.length) md += "\n";
+  });
+  md += "### Controls\n\n";
+  md += "| # | Frame | Form | Tag | Type | Name | acc-name source | Visible label | Required | autocomplete | Issues | Selector |\n";
+  md += "|---|-------|------|-----|------|------|-----------------|---------------|----------|--------------|--------|----------|\n";
+  allControls.forEach(function (r) {
+    var issues = r.issues.length ? "⚠ " + r.issues.map(function (i) { return mdEsc(i.text); }).join("; ") : "";
+    var frameLabel = r.isTop ? "(top)" : mdEsc(r.frameLabel || r.frameUrl);
+    var formCell = r.formIndex ? "#" + r.formIndex : "(no form)";
+    md += "| " + r.displayIndex + " | " + frameLabel + " | " + formCell + " | `" + r.tag + "` | " + (r.type || "") + " | " + (r.nameAttr ? "`" + mdEsc(r.nameAttr) + "`" : "") + " | `" + mdEsc(r.accName || "(empty)") + "` | " + (r.accNameSrc || "") + " | " + mdEsc(r.visibleLabelText || "") + " | " + (r.required ? "yes" : r.ariaRequired ? "aria=" + r.ariaRequired : "") + " | `" + mdEsc(r.autocomplete || "(none)") + "`" + (r.autocompleteSuggestion ? " *(suggest: " + r.autocompleteSuggestion + ")*" : "") + " | " + issues + " | `" + mdEsc(r.selector) + "` |\n";
+  });
+
+  /* ----- counts + summary ----- */
+
+  var issueCount = allControls.filter(function (r) { return r.issues.length > 0; }).length;
+  var formIssueCount = allForms.filter(function (f) { return f.issues.length > 0; }).length;
+  var counts = {
+    unlabeled: allControls.filter(function (r) { return r.issues.some(function (i) { return i.category === "unlabeled"; }); }).length,
+    requiredProblems: allControls.filter(function (r) { return r.issues.some(function (i) { return /required-/.test(i.category); }); }).length,
+    wiring: allControls.filter(function (r) { return r.issues.some(function (i) { return i.category === "bad-idref" || i.category === "invalid-no-error-ref"; }); }).length,
+    radioGroups: allControls.filter(function (r) { return r.issues.some(function (i) { return i.category === "group-no-fieldset" || i.category === "empty-legend"; }); }).length,
+    autocomplete: allControls.filter(function (r) { return r.issues.some(function (i) { return i.category === "missing-autocomplete" || i.category === "invalid-autocomplete"; }); }).length,
+    wrapping: allControls.filter(function (r) { return r.issues.some(function (i) { return i.category === "wrapping-label-implicit"; }); }).length,
+    layout: allControls.filter(function (r) { return r.issues.some(function (i) { return i.category === "label-not-left-aligned" || i.category === "label-side-positioned" || i.category === "label-below-input" || i.category === "multi-control-row"; }); }).length,
+    validation: allForms.filter(function (f) { return f.issues.some(function (i) { return i.category === "form-native-validation"; }); }).length
+  };
+  var frameCount = framesData.filter(function (f) { return !f.isTop && (f.controls && f.controls.length || f.forms && f.forms.length); }).length;
+
+  console.group("%c[a11yn forms] " + allControls.length + " controls across " + allForms.length + " form(s) — " + issueCount + " controls with issues, " + formIssueCount + " forms with issues",
+    "color:#003876;font-weight:bold;font-size:13px");
+  console.table(allControls.map(function (r) {
+    return {
+      "#": r.displayIndex,
+      frame: r.isTop ? "(top)" : (r.frameLabel || r.frameUrl),
+      form: r.formIndex || "(none)",
+      tag: r.tag,
+      type: r.type || "",
+      name: r.nameAttr || "",
+      acc: r.accName || "(empty)",
+      "acc-src": r.accNameSrc,
+      label: r.visibleLabelText,
+      req: r.required ? "yes" : r.ariaRequired || "",
+      ac: r.autocomplete || "",
+      issues: r.issues.length
+    };
+  }));
+  console.log("%cMarkdown:", "font-weight:bold");
+  console.log(md);
+  console.groupEnd();
+
+  /* ----- panel ----- */
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  var panelEl = document.createElement("div");
+  panelEl.className = "panel filter-all";
+
+  var summary = "";
+  if (allControls.length === 0) {
+    summary += '<span class="warn">No form controls found.</span>';
+  } else if (issueCount === 0 && formIssueCount === 0) {
+    summary += '<span class="ok">All ' + allControls.length + ' controls and ' + allForms.length + ' form(s) look fine.</span>';
+  } else {
+    summary += '<span class="miss">' + issueCount + ' control' + (issueCount === 1 ? "" : "s") + ' with issues';
+    if (formIssueCount) summary += ", " + formIssueCount + " form" + (formIssueCount === 1 ? "" : "s") + " with issues";
+    summary += '</span>';
+  }
+  summary += '<div style="margin-top:6px;color:#555;font-size:14px">' +
+    allControls.length + ' controls · ' + allForms.length + ' form(s) · top doc' +
+    (frameCount ? ' + ' + frameCount + ' frame' + (frameCount === 1 ? "" : "s") : "") +
+    (unmatchedFrames ? ' · ⚠ ' + unmatchedFrames + ' unpositioned frame(s)' : "") +
+    '</div>';
+
+  panelEl.innerHTML =
+    "<header><strong>Forms (" + allControls.length + " ctrl / " + allForms.length + " form)</strong>" +
+    '<div class="btns"><button id="' + P + 'copy">Copy MD</button><button id="' + P + 'close">Close</button></div></header>' +
+    '<div class="filterbar">' +
+      '<button data-filter="all" class="active">All (' + allControls.length + ')</button>' +
+      '<button data-filter="issues">Issues (' + issueCount + ')</button>' +
+      '<button data-filter="unlabeled">Unlabeled (' + counts.unlabeled + ')</button>' +
+      '<button data-filter="required">Required (' + counts.requiredProblems + ')</button>' +
+      '<button data-filter="wiring">Invalid wiring (' + counts.wiring + ')</button>' +
+      '<button data-filter="radio-groups">Radio groups (' + counts.radioGroups + ')</button>' +
+      '<button data-filter="autocomplete">Autocomplete (' + counts.autocomplete + ')</button>' +
+      '<button data-filter="wrapping">Wrapping labels (' + counts.wrapping + ')</button>' +
+      '<button data-filter="layout">Layout (' + counts.layout + ')</button>' +
+      '<button data-filter="validation">Native validation (' + counts.validation + ')</button>' +
+    '</div>' +
+    '<div class="summary">' + summary + "</div>" +
+    '<div class="body" id="' + P + 'body"></div>';
+
+  // Group controls by form. Build a section per form, plus a "(no form)" section.
+  var bodyEl = panelEl.querySelector("#" + P + "body");
+  function addFormSection(form, controls) {
+    var section = document.createElement("div");
+    section.className = "formsection";
+    var formIssuesHtml = "";
+    var hasValidation = false;
+    var formIssueClasses = "";
+    if (form) {
+      if (form.issues.some(function (i) { return i.category === "form-native-validation"; })) { hasValidation = true; section.classList.add("has-form-validation"); }
+      var issueLines = form.issues.map(function (i) {
+        var cls = (i.category === "form-no-submit") ? "formwarn" : "formissues";
+        return '<div class="' + cls + '">⚠ <strong>' + esc(i.category) + '</strong> — ' + esc(i.text) + (i.validatingFields ? " — fields: " + i.validatingFields.map(function (vf) { return esc(vf.name || vf.tag) + "/" + esc(vf.type); }).join(", ") : "") + "</div>";
+      }).join("");
+      formIssuesHtml = issueLines;
+    }
+    var formTitle;
+    if (form) {
+      formTitle = '<strong>Form #' + form.formIndex + '</strong>';
+      if (form.formId) formTitle += ' <code>id="' + esc(form.formId) + '"</code>';
+      if (form.formName) formTitle += ' name="' + esc(form.formName) + '"';
+      if (form.formAction) formTitle += ' action=' + esc(form.formAction.length > 40 ? form.formAction.slice(0, 40) + "…" : form.formAction);
+      formTitle += ' · ' + controls.length + ' control' + (controls.length === 1 ? "" : "s");
+      if (form.novalidate) formTitle += ' · <span style="color:#0a8043">novalidate</span>';
+      if (form.frameLabel) formTitle += ' <span style="color:#0a5d2e">[' + esc(form.frameLabel) + ']</span>';
+    } else {
+      formTitle = "<strong>Controls outside any &lt;form&gt; (" + controls.length + ")</strong>";
+    }
+    var head = document.createElement("div");
+    head.className = "formhead";
+    head.innerHTML = formTitle + formIssuesHtml;
+    section.appendChild(head);
+
+    var list = document.createElement("ol");
+    controls.forEach(function (r) {
+      var li = document.createElement("li");
+      var hasErr = r.issues.some(function (i) {
+        var c = i.category;
+        return c === "unlabeled" || c === "bad-idref" || c === "required-aria-contradiction" ||
+               c === "invalid-autocomplete" || c === "image-input-no-alt" || c === "group-no-fieldset" ||
+               c === "invalid-no-error-ref" || c === "empty-legend";
+      });
+      var hasWarn = r.issues.length > 0 && !hasErr;
+      if (hasErr) li.classList.add("has-err");
+      if (hasWarn) li.classList.add("has-warn");
+      // Filter classes
+      r.issues.forEach(function (i) {
+        if (i.category === "unlabeled") li.classList.add("has-unlabeled");
+        if (/^required-/.test(i.category)) li.classList.add("has-required-issue");
+        if (i.category === "bad-idref" || i.category === "invalid-no-error-ref") li.classList.add("has-wiring-issue");
+        if (i.category === "group-no-fieldset" || i.category === "empty-legend") li.classList.add("has-group-issue");
+        if (i.category === "missing-autocomplete" || i.category === "invalid-autocomplete") li.classList.add("has-autocomplete-issue");
+        if (i.category === "wrapping-label-implicit") li.classList.add("has-wrapping-issue");
+        if (i.category === "label-not-left-aligned" || i.category === "label-side-positioned" || i.category === "label-below-input" || i.category === "multi-control-row") li.classList.add("has-layout-issue");
+      });
+
+      var nameHtml;
+      if (r.accName) {
+        nameHtml = '<div class="accname">' + esc(r.accName) + '</div><div class="accsource">via ' + esc(r.accNameSrc) + '</div>';
+      } else {
+        nameHtml = '<div class="accname empty">(no accessible name)</div>';
+      }
+
+      var location = r.isTop ? "" : '<span class="frame-label">[' + esc(r.frameLabel || r.frameUrl) + ']</span> ';
+      var tagDesc = "<code>&lt;" + esc(r.tag) + (r.type ? ' type="' + esc(r.type) + '"' : "") + "&gt;</code>";
+
+      var chips = [];
+      if (r.required) chips.push('<span class="smallchip req">required</span>');
+      if (r.ariaRequired === "true" && !r.required) chips.push('<span class="smallchip req">aria-required</span>');
+      if (r.disabled) chips.push('<span class="smallchip disabled">disabled</span>');
+      if (r.ariaDisabled && !r.disabled) chips.push('<span class="smallchip disabled">aria-disabled</span>');
+      if (r.readonly) chips.push('<span class="smallchip readonly">readonly</span>');
+      if (r.ariaInvalid === "true") chips.push('<span class="smallchip invalid">aria-invalid</span>');
+      if (r.autocomplete) chips.push('<span class="smallchip auto">autocomplete=' + esc(r.autocomplete) + '</span>');
+
+      var issuesHtml = "";
+      if (r.issues.length) {
+        issuesHtml = '<div class="issues">' + r.issues.map(function (iss) {
+          var color = CATEGORY_COLORS[iss.category] || "#b00020";
+          return '<div class="issue"><span class="catchip" style="background:' + color + '">' + esc(iss.category) + '</span><span class="text">' + esc(iss.text) + '</span></div>';
+        }).join("") + '</div>';
+      }
+
+      li.innerHTML =
+        '<div class="meta">' +
+          '<span style="color:#999">#' + r.displayIndex + '</span> ' + location + tagDesc +
+          (r.nameAttr ? ' name="' + esc(r.nameAttr) + '"' : "") +
+        '</div>' +
+        nameHtml +
+        (r.visibleLabelText && r.visibleLabelText !== r.accName ? '<div style="color:#666;font-size:13px">visible label: "' + esc(r.visibleLabelText) + '"</div>' : "") +
+        (chips.length ? '<div class="badges">' + chips.join("") + '</div>' : "") +
+        issuesHtml +
+        '<div class="src">' + esc(r.selector) + '</div>';
+
+      li.addEventListener("click", function () {
+        try {
+          if (r._resolveEl) {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+          } else if (r.iframeEl) {
+            r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+          if (r.badge) {
+            r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+          }
+        } catch (e) {}
+      });
+      list.appendChild(li);
+    });
+    section.appendChild(list);
+    bodyEl.appendChild(section);
+  }
+
+  // Forms first
+  allForms.forEach(function (f) {
+    var ctrls = allControls.filter(function (c) { return c.formIndex === f.formIndex && (c.frameUrl === f.frameUrl); });
+    addFormSection(f, ctrls);
+  });
+  // Orphan controls (no form)
+  var orphan = allControls.filter(function (c) { return !c.formIndex; });
+  if (orphan.length) addFormSection(null, orphan);
+
+  shadow.appendChild(panelEl);
+
+  /* ----- filter bar wiring ----- */
+
+  panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var filter = btn.dataset.filter;
+      panelEl.className = "panel filter-" + filter;
+      panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+
+  /* ----- drag ----- */
+
+  (function () {
+    var header = panelEl.querySelector("header");
+    if (!header) return;
+    header.style.cursor = "move";
+    header.style.userSelect = "none";
+    header.style.touchAction = "none";
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    header.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest("button")) return;
+      var rect = panelEl.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true;
+      panelEl.style.left = startLeft + "px";
+      panelEl.style.top = startTop + "px";
+      panelEl.style.right = "auto";
+      try { header.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var newLeft = startLeft + (e.clientX - startX);
+      var newTop = startTop + (e.clientY - startY);
+      var minLeft = 40 - panelEl.offsetWidth;
+      var maxLeft = window.innerWidth - 40;
+      var maxTop = window.innerHeight - 40;
+      newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+      newTop = Math.max(0, Math.min(maxTop, newTop));
+      panelEl.style.left = newLeft + "px";
+      panelEl.style.top = newTop + "px";
+    });
+    header.addEventListener("pointerup", function (e) {
+      dragging = false;
+      try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    });
+    header.addEventListener("pointercancel", function () { dragging = false; });
+  })();
+
+  panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+  panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+    var btn = e.currentTarget;
+    var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+    }
+  });
+
+  window[P + "active"] = checkId;
+  window[P + "cleanup"] = function () {
+    try { host.remove(); } catch (e) {}
+    allControls.forEach(function (r) {
+      if (r._resolveEl) {
+        try {
+          r._resolveEl.style.removeProperty("outline");
+          r._resolveEl.style.removeProperty("outline-offset");
+        } catch (e) {}
+      }
+    });
+    delete window[P + "cleanup"];
+    delete window[P + "active"];
+    console.log("%c[a11yn] cleared.", "color:#003876");
+  };
+
+  } catch (displayErr) {
+    console.error("[a11yn forms display error]", displayErr);
+    try {
+      var errHost = document.createElement("div");
+      errHost.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;background:#b00020 !important;color:#fff !important;padding:12px 16px !important;font:600 14px/1.4 ui-sans-serif,system-ui,sans-serif !important;border-radius:6px !important;max-width:400px !important;box-shadow:0 6px 20px rgba(0,0,0,.25) !important;white-space:pre-wrap !important;";
+      errHost.textContent = "Forms display error: " + (displayErr && displayErr.message ? displayErr.message : displayErr) + ". See page DevTools console for full stack.";
+      (document.body || document.documentElement).appendChild(errHost);
+      setTimeout(function () { try { errHost.remove(); } catch (e) {} }, 10000);
+    } catch (e) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: TABLES — table semantics inspector
+ *
+ * Covers WCAG 1.3.1 Info and Relationships. Every <table> (and any
+ * element with role="table"/role="grid") on the page is classified
+ * data / layout-declared / ambiguous and inspected for issues:
+ *
+ *   data-no-name              data table lacks <caption>, aria-label, aria-labelledby
+ *   data-no-headers           data table has no <th> anywhere
+ *   caption-not-first-child   <caption> exists but isn't the first child of <table>
+ *   multiple-captions         more than one <caption> inside one <table>
+ *   summary-attribute         summary= used (obsolete in HTML5)
+ *   presentation-with-data    role="presentation"/"none" but table has data signals
+ *   layout-with-data-signals  no <th> but has <caption>/summary/aria-label
+ *   nested-table              <table> inside another <table>
+ *   th-empty                  <th> with no accessible name
+ *   th-invalid-scope          scope= not in row/col/rowgroup/colgroup
+ *   th-missing-scope-complex  <th> with no scope= in a table that has both row & col headers
+ *   spanned-cell-no-headers   cell with colspan/rowspan > 1 has no headers= in a complex table
+ *   bad-headers-idref         headers= references an ID that doesn't exist or isn't a <th> in the same table
+ *   th-without-table          <th> outside any <table>
+ *   likely-data-no-th         no <th>, but first row visually styled as headers
+ *
+ * Each table also reports row/col counts and a small <th> inventory.
+ * ==================================================================== */
+
+function scanTables() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+
+    function txt(el) {
+      if (!el) return "";
+      var s = (el.textContent || "").replace(/\s+/g, " ").trim();
+      return s;
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      var n = el;
+      while (n && n.nodeType === 1) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+        n = n.parentNode || (n.getRootNode && n.getRootNode().host);
+      }
+      return false;
+    }
+
+    function ariaHidden(el) {
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        if (n.getAttribute && n.getAttribute("aria-hidden") === "true") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) {
+          path.unshift("#" + CSS.escape(node.id));
+          break;
+        }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break; // stop at shadow root / document fragment
+      }
+      return path.join(" > ");
+    }
+
+    function accName(el) {
+      if (!el) return "";
+      // aria-labelledby
+      var alb = el.getAttribute && el.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var root = el.getRootNode ? el.getRootNode() : document;
+          var ref = root.getElementById ? root.getElementById(ids[i]) : null;
+          if (!ref) ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return joined;
+      }
+      // aria-label
+      var al = el.getAttribute && el.getAttribute("aria-label");
+      if (al && al.trim()) return al.trim();
+      // <caption>
+      if (el.tagName === "TABLE") {
+        var cap = el.querySelector(":scope > caption");
+        if (cap) {
+          var capText = txt(cap);
+          if (capText) return capText;
+        }
+      }
+      // title
+      var ti = el.getAttribute && el.getAttribute("title");
+      if (ti && ti.trim()) return ti.trim();
+      return "";
+    }
+
+    function thAccName(th) {
+      var alb = th.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var root = th.getRootNode ? th.getRootNode() : document;
+          var ref = root.getElementById ? root.getElementById(ids[i]) : null;
+          if (!ref) ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return joined;
+      }
+      var al = th.getAttribute("aria-label");
+      if (al && al.trim()) return al.trim();
+      var t = txt(th);
+      if (t) return t;
+      // image-only header
+      var img = th.querySelector("img[alt]");
+      if (img) {
+        var alt = img.getAttribute("alt");
+        if (alt && alt.trim()) return alt.trim();
+      }
+      var ti = th.getAttribute("title");
+      if (ti && ti.trim()) return ti.trim();
+      return "";
+    }
+
+    var VALID_SCOPE = { row: 1, col: 1, rowgroup: 1, colgroup: 1 };
+
+    function looksLikeHeaderRow(tr) {
+      if (!tr) return false;
+      var cells = tr.children;
+      if (!cells || cells.length < 2) return false;
+      var anyTh = false, all = true, count = 0;
+      for (var i = 0; i < cells.length; i++) {
+        var c = cells[i];
+        if (c.tagName !== "TD" && c.tagName !== "TH") continue;
+        count++;
+        if (c.tagName === "TH") anyTh = true;
+        if (c.tagName === "TD") {
+          var t = txt(c);
+          if (!t) { all = false; continue; }
+          var cs;
+          try { cs = getComputedStyle(c); } catch (e) { cs = null; }
+          var weight = cs ? cs.fontWeight : "";
+          // Treat as "header-styled" if bold (>= 600) OR contains a <strong>/<b>
+          var bold = (weight === "bold" || (weight && parseInt(weight, 10) >= 600));
+          var hasStrong = !!c.querySelector("strong, b");
+          if (!(bold || hasStrong)) { all = false; }
+        }
+      }
+      return count >= 2 && all && !anyTh;
+    }
+
+    function getTableCells(table) {
+      // Direct cells in this table only, not nested table cells.
+      var cells = [];
+      function walk(node) {
+        for (var i = 0; i < node.children.length; i++) {
+          var c = node.children[i];
+          if (c.tagName === "TABLE") continue; // skip nested
+          if (c.tagName === "TD" || c.tagName === "TH") cells.push(c);
+          else walk(c);
+        }
+      }
+      walk(table);
+      return cells;
+    }
+
+    function getTableRows(table) {
+      var rows = [];
+      function walk(node) {
+        for (var i = 0; i < node.children.length; i++) {
+          var c = node.children[i];
+          if (c.tagName === "TABLE") continue;
+          if (c.tagName === "TR") rows.push(c);
+          else walk(c);
+        }
+      }
+      walk(table);
+      return rows;
+    }
+
+    function colsInRow(tr) {
+      var n = 0;
+      for (var i = 0; i < tr.children.length; i++) {
+        var c = tr.children[i];
+        if (c.tagName !== "TD" && c.tagName !== "TH") continue;
+        var span = parseInt(c.getAttribute("colspan") || "1", 10);
+        if (!isFinite(span) || span < 1) span = 1;
+        n += span;
+      }
+      return n;
+    }
+
+    function analyseTable(table) {
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(table),
+        tag: table.tagName.toLowerCase(),
+        role: (table.getAttribute && table.getAttribute("role")) || "",
+        ariaLabel: (table.getAttribute && table.getAttribute("aria-label")) || "",
+        ariaLabelledby: (table.getAttribute && table.getAttribute("aria-labelledby")) || "",
+        captionText: "",
+        summaryAttr: (table.getAttribute && table.getAttribute("summary")) || "",
+        accName: "",
+        rows: 0,
+        cols: 0,
+        hasThead: false,
+        hasTbody: false,
+        hasTfoot: false,
+        thInventory: { col: 0, row: 0, rowgroup: 0, colgroup: 0, unscoped: 0, total: 0 },
+        status: "data",
+        hidden: isHidden(table) || ariaHidden(table),
+        issues: [],
+        _resolveSel: uniqueSelector(table)
+      };
+      entry.accName = accName(table);
+
+      var captions = table.tagName === "TABLE" ? table.querySelectorAll(":scope > caption") : [];
+      if (captions && captions.length > 0) {
+        entry.captionText = txt(captions[0]);
+        if (captions.length > 1) {
+          entry.issues.push({ type: "multiple-captions", text: "Table has " + captions.length + " <caption> elements (only one is allowed)" });
+        }
+        if (table.firstElementChild && table.firstElementChild.tagName !== "CAPTION") {
+          entry.issues.push({ type: "caption-not-first-child", text: "<caption> must be the first child of <table>" });
+        }
+      }
+
+      if (table.tagName === "TABLE") {
+        entry.hasThead = !!table.querySelector(":scope > thead");
+        entry.hasTbody = !!table.querySelector(":scope > tbody");
+        entry.hasTfoot = !!table.querySelector(":scope > tfoot");
+      }
+
+      var rows = table.tagName === "TABLE" ? getTableRows(table) : [];
+      entry.rows = rows.length;
+      var maxCols = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var c = colsInRow(rows[i]);
+        if (c > maxCols) maxCols = c;
+      }
+      entry.cols = maxCols;
+
+      // Collect <th> inventory and check scope validity.
+      var ths = [];
+      if (table.tagName === "TABLE") {
+        var raw = table.querySelectorAll("th");
+        for (var j = 0; j < raw.length; j++) {
+          // skip <th> belonging to a nested table
+          var anc = raw[j].parentNode;
+          var insideThis = false;
+          while (anc) {
+            if (anc.tagName === "TABLE") { insideThis = (anc === table); break; }
+            anc = anc.parentNode;
+          }
+          if (insideThis) ths.push(raw[j]);
+        }
+      }
+      entry.thInventory.total = ths.length;
+      for (var k = 0; k < ths.length; k++) {
+        var th = ths[k];
+        var sc = (th.getAttribute("scope") || "").trim().toLowerCase();
+        if (sc) {
+          if (VALID_SCOPE[sc]) {
+            entry.thInventory[sc]++;
+          } else {
+            entry.issues.push({
+              type: "th-invalid-scope",
+              text: "<th> has invalid scope=\"" + th.getAttribute("scope") + "\" (must be row, col, rowgroup, or colgroup) — " + uniqueSelector(th)
+            });
+          }
+        } else {
+          entry.thInventory.unscoped++;
+        }
+        // empty <th>?
+        if (!thAccName(th)) {
+          entry.issues.push({
+            type: "th-empty",
+            text: "Empty <th> — no text, no aria-label, no aria-labelledby, no image alt — " + uniqueSelector(th)
+          });
+        }
+      }
+
+      // Determine whether the table has both row and column headers.
+      var hasColHeaders = entry.thInventory.col > 0 || entry.thInventory.colgroup > 0;
+      var hasRowHeaders = entry.thInventory.row > 0 || entry.thInventory.rowgroup > 0;
+      // If no scope at all, fall back to position-based detection.
+      if (!hasColHeaders && !hasRowHeaders && ths.length > 0) {
+        // any <th> in first row?
+        var firstRow = rows[0];
+        var firstRowHasTh = false;
+        if (firstRow) {
+          for (var fr = 0; fr < firstRow.children.length; fr++) {
+            if (firstRow.children[fr].tagName === "TH") { firstRowHasTh = true; break; }
+          }
+        }
+        if (firstRowHasTh) hasColHeaders = true;
+        // any <th> as first cell in non-first rows?
+        var firstColTh = false;
+        for (var rr = 1; rr < rows.length; rr++) {
+          var cells = rows[rr].children;
+          if (cells.length > 0 && cells[0].tagName === "TH") { firstColTh = true; break; }
+        }
+        if (firstColTh) hasRowHeaders = true;
+      }
+      var complex = hasColHeaders && hasRowHeaders;
+
+      // If complex, <th> without scope= is ambiguous.
+      if (complex) {
+        for (var x = 0; x < ths.length; x++) {
+          var th2 = ths[x];
+          var sc2 = (th2.getAttribute("scope") || "").trim().toLowerCase();
+          if (!sc2) {
+            entry.issues.push({
+              type: "th-missing-scope-complex",
+              text: "<th> in a table with both row and column headers needs scope=\"row\"/\"col\" to disambiguate — " + uniqueSelector(th2) + (txt(th2) ? " (\"" + txt(th2).slice(0, 30) + "\")" : "")
+            });
+          }
+        }
+      }
+
+      // Spanned cells without explicit headers= in a complex table.
+      if (complex && table.tagName === "TABLE") {
+        var allCells = getTableCells(table);
+        for (var y = 0; y < allCells.length; y++) {
+          var cell = allCells[y];
+          var cs = parseInt(cell.getAttribute("colspan") || "1", 10);
+          var rs = parseInt(cell.getAttribute("rowspan") || "1", 10);
+          if ((cs > 1 || rs > 1) && !cell.getAttribute("headers")) {
+            entry.issues.push({
+              type: "spanned-cell-no-headers",
+              text: (cell.tagName === "TH" ? "<th> " : "<td> ") + "with colspan/rowspan > 1 in a complex table has no headers= attribute — " + uniqueSelector(cell)
+            });
+          }
+        }
+      }
+
+      // Validate every headers= idref inside this table.
+      if (table.tagName === "TABLE") {
+        var allCells2 = getTableCells(table);
+        for (var z = 0; z < allCells2.length; z++) {
+          var c2 = allCells2[z];
+          var hattr = c2.getAttribute("headers");
+          if (!hattr) continue;
+          var ids = hattr.split(/\s+/).filter(Boolean);
+          var missing = [];
+          var notTh = [];
+          for (var ii = 0; ii < ids.length; ii++) {
+            var ref = table.querySelector("#" + CSS.escape(ids[ii]));
+            if (!ref) {
+              // not in this table, try whole doc
+              var anyRef = document.getElementById(ids[ii]);
+              if (!anyRef) missing.push(ids[ii]);
+              else notTh.push(ids[ii] + " (outside this table)");
+            } else if (ref.tagName !== "TH") {
+              notTh.push(ids[ii] + " (not a <th>)");
+            }
+          }
+          if (missing.length || notTh.length) {
+            var bits = [];
+            if (missing.length) bits.push("missing: " + missing.join(", "));
+            if (notTh.length) bits.push("invalid: " + notTh.join(", "));
+            entry.issues.push({
+              type: "bad-headers-idref",
+              text: "headers= on cell references " + bits.join("; ") + " — " + uniqueSelector(c2)
+            });
+          }
+        }
+      }
+
+      // Classification.
+      var role = entry.role.toLowerCase();
+      var isPresRole = role === "presentation" || role === "none";
+      var dataSignals = [];
+      if (entry.thInventory.total > 0) dataSignals.push("<th>");
+      if (entry.captionText) dataSignals.push("<caption>");
+      if (entry.summaryAttr) dataSignals.push("summary=");
+      if (entry.ariaLabel) dataSignals.push("aria-label");
+      if (entry.ariaLabelledby) dataSignals.push("aria-labelledby");
+      if (role === "table" || role === "grid") dataSignals.push("role=" + role);
+
+      if (isPresRole) {
+        entry.status = "layout-declared";
+        if (dataSignals.length) {
+          entry.issues.push({
+            type: "presentation-with-data",
+            text: "Table has role=\"" + role + "\" but also carries data semantics: " + dataSignals.join(", ") + ". The role strips semantics, leaving the data elements meaningless."
+          });
+        }
+      } else if (dataSignals.length > 0) {
+        entry.status = "data";
+      } else {
+        entry.status = "ambiguous";
+      }
+
+      // Data-table-specific issues.
+      if (entry.status === "data") {
+        if (!entry.accName) {
+          entry.issues.push({
+            type: "data-no-name",
+            text: "Data table has no accessible name (no <caption>, aria-label, or aria-labelledby). Screen readers can't announce what the table is about."
+          });
+        }
+        if (entry.thInventory.total === 0) {
+          entry.issues.push({
+            type: "data-no-headers",
+            text: "Data table has no <th> elements. Cells have no programmatic header association."
+          });
+        }
+      }
+
+      // Layout/ambiguous tables with data signals (but no <th>).
+      if ((entry.status === "ambiguous" || (entry.status === "data" && entry.thInventory.total === 0)) && !isPresRole) {
+        var mixed = [];
+        if (entry.captionText) mixed.push("<caption>");
+        if (entry.summaryAttr) mixed.push("summary=");
+        if (entry.ariaLabel) mixed.push("aria-label");
+        if (entry.ariaLabelledby) mixed.push("aria-labelledby");
+        if (entry.thInventory.total === 0 && mixed.length > 1) {
+          entry.issues.push({
+            type: "layout-with-data-signals",
+            text: "Table has no <th> but carries multiple naming signals: " + mixed.join(", ") + ". Either make it a real data table (add <th>) or remove the labels."
+          });
+        }
+      }
+
+      // Obsolete summary= attribute.
+      if (entry.summaryAttr) {
+        entry.issues.push({
+          type: "summary-attribute",
+          text: "summary=\"" + entry.summaryAttr.slice(0, 60) + (entry.summaryAttr.length > 60 ? "…" : "") + "\" — the summary attribute is obsolete in HTML5. Use <caption> or aria-describedby instead."
+        });
+      }
+
+      // Nested table detection.
+      if (table.tagName === "TABLE") {
+        var anc2 = table.parentNode;
+        while (anc2) {
+          if (anc2.tagName === "TABLE") {
+            entry.issues.push({
+              type: "nested-table",
+              text: "Table is nested inside another <table> (" + uniqueSelector(anc2) + "). Nesting confuses screen-reader table navigation."
+            });
+            break;
+          }
+          anc2 = anc2.parentNode;
+        }
+      }
+
+      // Heuristic: ambiguous table whose first row is bold-styled (likely a missing-<th> case).
+      if (entry.status === "ambiguous" && entry.thInventory.total === 0 && rows.length >= 2) {
+        if (looksLikeHeaderRow(rows[0])) {
+          entry.issues.push({
+            type: "likely-data-no-th",
+            text: "Table has no <th> but its first row is styled like headers (bold or <strong>). Use <th> to mark headers semantically."
+          });
+        }
+      }
+
+      return entry;
+    }
+
+    function walk(root) {
+      if (!root) return;
+      var tables;
+      try {
+        tables = root.querySelectorAll('table, [role="table"], [role="grid"]');
+      } catch (e) {
+        tables = [];
+      }
+      for (var i = 0; i < tables.length; i++) {
+        results.push(analyseTable(tables[i]));
+      }
+
+      // <th> outside any <table>
+      var orphanThs;
+      try { orphanThs = root.querySelectorAll("th"); } catch (e) { orphanThs = []; }
+      for (var t = 0; t < orphanThs.length; t++) {
+        var th = orphanThs[t];
+        var anc = th.parentNode;
+        var inside = false;
+        while (anc && anc.nodeType === 1) {
+          if (anc.tagName === "TABLE") { inside = true; break; }
+          anc = anc.parentNode;
+        }
+        if (!inside) {
+          results.push({
+            idx: ++idCounter,
+            sel: uniqueSelector(th),
+            tag: "th-orphan",
+            status: "orphan",
+            accName: thAccName(th),
+            rows: 0, cols: 0,
+            hasThead: false, hasTbody: false, hasTfoot: false,
+            thInventory: { col: 0, row: 0, rowgroup: 0, colgroup: 0, unscoped: 0, total: 0 },
+            issues: [{ type: "th-without-table", text: "<th> element outside any <table>" }],
+            _resolveSel: uniqueSelector(th)
+          });
+        }
+      }
+
+      // Recurse into open shadow roots.
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var s = 0; s < all.length; s++) {
+        if (all[s].shadowRoot) {
+          shadowRoots++;
+          walk(all[s].shadowRoot);
+        }
+      }
+    }
+
+    walk(document);
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayTables(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    // Resolve elements (only top frame is reachable from this script).
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var rr = allResults[ai];
+      if (rr._frameIsTop && rr._resolveSel) {
+        try { rr._resolveEl = document.querySelector(rr._resolveSel); } catch (e) {}
+      }
+    }
+
+    var data = 0, layout = 0, ambiguous = 0, orphan = 0, withIssues = 0;
+    for (var di = 0; di < allResults.length; di++) {
+      var d = allResults[di];
+      if (d.status === "data") data++;
+      else if (d.status === "layout-declared") layout++;
+      else if (d.status === "ambiguous") ambiguous++;
+      else if (d.status === "orphan") orphan++;
+      if (d.issues && d.issues.length) withIssues++;
+    }
+
+    // ----- on-page badges -----
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 480px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.data { background: #1a7f1a; color: #fff; }' +
+      '.chip.layout { background: #707070; color: #fff; }' +
+      '.chip.ambig { background: #a07000; color: #fff; }' +
+      '.chip.orphan { background: #b00020; color: #fff; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.name.missing { color: #b00020; font-style: italic; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-data li.row:not(.is-data) { display: none; }' +
+      '.panel.filter-layout li.row:not(.is-layout) { display: none; }' +
+      '.panel.filter-ambig li.row:not(.is-ambig) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var html = "";
+    html += '<header><strong>Tables (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      data + " data",
+      layout + " layout (declared)",
+      ambiguous + " ambiguous",
+      orphan ? (orphan + " orphan <th>") : null,
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="data">Data (' + data + ')</button>' +
+            '<button data-filter="layout">Layout (' + layout + ')</button>' +
+            '<button data-filter="ambig">Ambiguous (' + (ambiguous + orphan) + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var statusChip = "ambig";
+      var statusLabel = "AMBIGUOUS";
+      if (t.status === "data") { statusChip = "data"; statusLabel = "DATA"; }
+      else if (t.status === "layout-declared") { statusChip = "layout"; statusLabel = "LAYOUT"; }
+      else if (t.status === "orphan") { statusChip = "orphan"; statusLabel = "ORPHAN <th>"; }
+      else if (t.status === "ambiguous") { statusChip = "ambig"; statusLabel = "AMBIGUOUS"; }
+
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.status === "data") classes.push("is-data");
+      if (t.status === "layout-declared") classes.push("is-layout");
+      if (t.status === "ambiguous") classes.push("is-ambig");
+      if (t.status === "orphan") classes.push("is-ambig"); // orphans show under ambiguous filter
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+      html += '<span class="chip ' + statusChip + '">' + statusLabel + '</span>';
+      if (t.accName) {
+        html += '<span class="name">' + esc(t.accName) + '</span>';
+      } else if (t.status === "data") {
+        html += '<span class="name missing">(no accessible name)</span>';
+      }
+
+      var metaParts = [];
+      if (t.status !== "orphan") {
+        metaParts.push(t.rows + " rows × " + t.cols + " cols");
+        var thBits = [];
+        if (t.thInventory.col) thBits.push(t.thInventory.col + " col");
+        if (t.thInventory.row) thBits.push(t.thInventory.row + " row");
+        if (t.thInventory.rowgroup) thBits.push(t.thInventory.rowgroup + " rowgroup");
+        if (t.thInventory.colgroup) thBits.push(t.thInventory.colgroup + " colgroup");
+        if (t.thInventory.unscoped) thBits.push(t.thInventory.unscoped + " unscoped");
+        if (t.thInventory.total === 0) thBits.push("no <th>");
+        metaParts.push("<th>: " + thBits.join(", "));
+        if (t.hasThead || t.hasTbody || t.hasTfoot) {
+          var sections = [];
+          if (t.hasThead) sections.push("thead");
+          if (t.hasTbody) sections.push("tbody");
+          if (t.hasTfoot) sections.push("tfoot");
+          metaParts.push(sections.join("/"));
+        }
+        if (t.role) metaParts.push("role=" + t.role);
+        if (t.hidden) metaParts.push("HIDDEN");
+      }
+      if (metaParts.length) {
+        html += '<div class="meta">' + esc(metaParts.join(" · ")) + '</div>';
+      }
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          html += '<span class="issue">' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 1.3.1 Info and Relationships · Tables inventory</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    // Outline top-frame tables.
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = (o.issues && o.issues.length) ? "#b00020" : (o.status === "data" ? "#1a7f1a" : "#707070");
+          o._resolveEl.style.setProperty("outline", "3px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ----- markdown -----
+    var md = "# Tables\n\n";
+    md += "Counts: " + data + " data, " + layout + " layout, " + ambiguous + " ambiguous";
+    if (orphan) md += ", " + orphan + " orphan <th>";
+    md += ", " + withIssues + " with issues.\n\n";
+    md += "| # | Status | Name | Dimensions | <th> | Issues | Selector |\n";
+    md += "|---|--------|------|------------|------|--------|----------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var stat = mt.status;
+      var dims = mt.status === "orphan" ? "—" : (mt.rows + "×" + mt.cols);
+      var thBits2 = [];
+      if (mt.thInventory.col) thBits2.push(mt.thInventory.col + "c");
+      if (mt.thInventory.row) thBits2.push(mt.thInventory.row + "r");
+      if (mt.thInventory.rowgroup) thBits2.push(mt.thInventory.rowgroup + "rg");
+      if (mt.thInventory.colgroup) thBits2.push(mt.thInventory.colgroup + "cg");
+      if (mt.thInventory.unscoped) thBits2.push(mt.thInventory.unscoped + "u");
+      var thStr = thBits2.length ? thBits2.join("+") : (mt.thInventory.total === 0 ? "0" : "");
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      var name = mt.accName ? mt.accName.replace(/\|/g, "\\|") : "";
+      md += "| " + mt.idx + " | " + stat + " | " + name + " | " + dims + " | " + thStr + " | " + issueStr + " | `" + mt.sel.replace(/\|/g, "\\|") + "` |\n";
+    }
+
+    // ----- filter bar -----
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    // ----- drag -----
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    // Fallback error banner.
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Tables check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: IFRAMES — embedded-document inspector
+ *
+ * Covers WCAG 2.4.1 Bypass Blocks (frame name is the SR user's way of
+ * skipping a frame) and 4.1.2 Name, Role, Value (every iframe must
+ * expose an accessible name).
+ *
+ * The scanner runs in every frame via scripting.executeScript({
+ * allFrames: true }) — each frame inventories its OWN iframe children,
+ * and the aggregator stitches them together.
+ *
+ * Per-iframe flags:
+ *   missing-name              no title, no aria-label, no aria-labelledby
+ *   empty-name                attribute present but empty/whitespace
+ *   generic-name              "iframe", "frame", "embedded content", "untitled", "frame N", ...
+ *   name-matches-src          name is just the URL / hostname / filename
+ *   duplicate-name            two or more iframes share the same non-empty name
+ *   tabindex-negative-on-visible  visible iframe with tabindex="-1" removes the embedded doc from tab order
+ *   positive-tabindex         tabindex > 0 on iframe
+ *   aria-hidden-with-content  aria-hidden="true" on iframe that probably has interactive content
+ *   likely-tracking-not-hidden  1x1 / 0x0 / off-screen iframe with no aria-hidden and no title
+ *   empty-iframe              <iframe> with no src and no srcdoc
+ *   deprecated-frame          <frame> or <frameset> elements
+ *   role-presentation-on-iframe  role="presentation"/"none" on a non-trivial iframe
+ * ==================================================================== */
+
+function scanIframes() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var frameOrigin = (function () { try { return location.origin; } catch (e) { return ""; } })();
+    var idCounter = 0;
+
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    function ariaHiddenChain(el) {
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        if (n.getAttribute && n.getAttribute("aria-hidden") === "true") return true;
+      }
+      return false;
+    }
+
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+
+    function computeAccName(el) {
+      // aria-labelledby
+      var alb = el.getAttribute && el.getAttribute("aria-labelledby");
+      if (alb) {
+        var ids = alb.split(/\s+/).filter(Boolean);
+        var pieces = [];
+        for (var i = 0; i < ids.length; i++) {
+          var ref = document.getElementById(ids[i]);
+          if (ref) pieces.push(txt(ref));
+        }
+        var joined = pieces.join(" ").trim();
+        if (joined) return { value: joined, source: "aria-labelledby" };
+        // aria-labelledby present but produces empty/missing
+        return { value: "", source: "aria-labelledby", broken: true, ids: ids };
+      }
+      var al = el.getAttribute && el.getAttribute("aria-label");
+      if (al != null) {
+        var t = al.trim();
+        if (t) return { value: t, source: "aria-label" };
+        return { value: "", source: "aria-label", broken: true };
+      }
+      var ti = el.getAttribute && el.getAttribute("title");
+      if (ti != null) {
+        var tt = ti.trim();
+        if (tt) return { value: tt, source: "title" };
+        return { value: "", source: "title", broken: true };
+      }
+      return { value: "", source: "" };
+    }
+
+    var GENERIC = {
+      "iframe": 1, "frame": 1, "iframes": 1, "frames": 1,
+      "embedded content": 1, "embed": 1,
+      "untitled": 1, "untitled frame": 1, "untitled iframe": 1,
+      "content": 1, "widget": 1, "ad": 1, "advert": 1, "advertisement": 1
+    };
+    var GENERIC_PATTERN = /^(?:i?frame)\s*[-_:#]?\s*\d+$/i;
+
+    function isGenericName(name) {
+      if (!name) return false;
+      var n = name.toLowerCase().trim();
+      if (GENERIC[n]) return true;
+      if (GENERIC_PATTERN.test(name.trim())) return true;
+      return false;
+    }
+
+    function matchesSrc(name, src) {
+      if (!name || !src) return false;
+      var n = name.trim();
+      var s = src.trim();
+      if (n === s) return true;
+      // hostname?
+      try {
+        var u = new URL(src, location.href);
+        if (n === u.hostname) return true;
+        if (n === u.origin) return true;
+        // last path segment / filename
+        var parts = u.pathname.split("/").filter(Boolean);
+        if (parts.length) {
+          var last = parts[parts.length - 1];
+          if (n === last) return true;
+          // without query
+          var dot = last.lastIndexOf(".");
+          if (dot > 0 && n === last.slice(0, dot)) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    function probeOrigin(iframe) {
+      // Returns "same", "cross", or "unknown"
+      try {
+        var w = iframe.contentWindow;
+        if (!w) return "unknown";
+        // Reading location.href throws for cross-origin
+        var href = w.location.href;
+        if (href != null) return "same";
+        return "unknown";
+      } catch (e) {
+        return "cross";
+      }
+    }
+
+    function getSrc(iframe) {
+      var s = iframe.getAttribute("src");
+      if (s) return s;
+      var sd = iframe.getAttribute("srcdoc");
+      if (sd) return "srcdoc:" + (sd.length > 40 ? sd.slice(0, 40) + "…" : sd);
+      return "";
+    }
+
+    function isLikelyTracking(iframe, rect) {
+      if (!rect) return false;
+      // 0x0 or 1x1 or off-screen-positioned (negative coords with small size)
+      if (rect.width <= 1 && rect.height <= 1) return true;
+      if (rect.width === 0 && rect.height === 0) return true;
+      // positioned far off-screen with non-display:none style
+      try {
+        var cs = getComputedStyle(iframe);
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return false;
+      } catch (e) {}
+      // Far left or top
+      if (rect.left <= -1000 || rect.top <= -1000) return true;
+      return false;
+    }
+
+    function analyseIframe(iframe) {
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(iframe),
+        tag: iframe.tagName.toLowerCase(),
+        titleAttr: iframe.getAttribute("title") || "",
+        ariaLabel: iframe.getAttribute("aria-label") || "",
+        ariaLabelledby: iframe.getAttribute("aria-labelledby") || "",
+        accName: "",
+        accSource: "",
+        accNameBroken: false,
+        src: getSrc(iframe),
+        srcRaw: iframe.getAttribute("src") || "",
+        hasSrcdoc: !!iframe.getAttribute("srcdoc"),
+        role: iframe.getAttribute("role") || "",
+        tabindexRaw: iframe.getAttribute("tabindex"),
+        tabindex: null,
+        sandbox: iframe.getAttribute("sandbox"),
+        allow: iframe.getAttribute("allow") || "",
+        width: 0,
+        height: 0,
+        hidden: false,
+        ariaHidden: false,
+        origin: "unknown",
+        crossOrigin: false,
+        sameOrigin: false,
+        issues: [],
+        _resolveSel: uniqueSelector(iframe)
+      };
+
+      if (entry.tabindexRaw != null) {
+        var n = parseInt(entry.tabindexRaw, 10);
+        if (isFinite(n) && String(n) === entry.tabindexRaw.trim()) entry.tabindex = n;
+      }
+
+      var nameInfo = computeAccName(iframe);
+      entry.accName = nameInfo.value;
+      entry.accSource = nameInfo.source;
+      entry.accNameBroken = !!nameInfo.broken;
+
+      entry.hidden = isHidden(iframe);
+      entry.ariaHidden = ariaHiddenChain(iframe);
+
+      var rect;
+      try { rect = iframe.getBoundingClientRect(); } catch (e) { rect = null; }
+      if (rect) {
+        entry.width = Math.round(rect.width);
+        entry.height = Math.round(rect.height);
+      }
+
+      // Frame elements (HTML4) are deprecated.
+      if (entry.tag === "frame" || entry.tag === "frameset") {
+        entry.issues.push({
+          type: "deprecated-frame",
+          text: "<" + entry.tag + "> is obsolete in HTML5; use <iframe> instead."
+        });
+      }
+
+      // For <iframe> elements only, probe origin.
+      if (entry.tag === "iframe") {
+        entry.origin = probeOrigin(iframe);
+        entry.sameOrigin = entry.origin === "same";
+        entry.crossOrigin = entry.origin === "cross";
+      }
+
+      // Empty iframe (no src, no srcdoc).
+      if (entry.tag === "iframe" && !iframe.getAttribute("src") && !iframe.getAttribute("srcdoc")) {
+        entry.issues.push({
+          type: "empty-iframe",
+          text: "<iframe> has no src and no srcdoc — empty embed."
+        });
+      }
+
+      // Naming issues.
+      var hasAnyNameAttr = !!iframe.getAttribute("title") || iframe.getAttribute("aria-label") != null || !!iframe.getAttribute("aria-labelledby");
+      if (!hasAnyNameAttr && !entry.ariaHidden && !entry.hidden && entry.tag === "iframe") {
+        entry.issues.push({
+          type: "missing-name",
+          text: "<iframe> has no title, no aria-label, and no aria-labelledby. Screen-reader users have nothing to announce when entering the frame."
+        });
+      } else if (hasAnyNameAttr && !entry.accName) {
+        // attribute present but produces empty name
+        var details = [];
+        if (iframe.getAttribute("title") != null && !iframe.getAttribute("title").trim()) details.push('title=""');
+        if (iframe.getAttribute("aria-label") != null && !iframe.getAttribute("aria-label").trim()) details.push('aria-label=""');
+        if (iframe.getAttribute("aria-labelledby") && nameInfo.broken && nameInfo.source === "aria-labelledby") {
+          details.push("aria-labelledby=\"" + iframe.getAttribute("aria-labelledby") + "\" (IDs missing or empty)");
+        }
+        entry.issues.push({
+          type: "empty-name",
+          text: "<iframe> has a name attribute but the result is empty: " + (details.join(", ") || "no usable text")
+        });
+      }
+
+      if (entry.accName && isGenericName(entry.accName)) {
+        entry.issues.push({
+          type: "generic-name",
+          text: 'Accessible name is generic ("' + entry.accName + '") — give the frame a descriptive name explaining its purpose.'
+        });
+      }
+      if (entry.accName && entry.srcRaw && matchesSrc(entry.accName, entry.srcRaw)) {
+        entry.issues.push({
+          type: "name-matches-src",
+          text: 'Accessible name ("' + entry.accName + '") matches the src URL/hostname/filename — not a descriptive label.'
+        });
+      }
+
+      // Tabindex issues.
+      if (entry.tabindex != null) {
+        if (entry.tabindex > 0) {
+          entry.issues.push({
+            type: "positive-tabindex",
+            text: 'tabindex="' + entry.tabindex + '" on <iframe> breaks natural DOM order.'
+          });
+        } else if (entry.tabindex < 0 && !entry.hidden && !entry.ariaHidden) {
+          entry.issues.push({
+            type: "tabindex-negative-on-visible",
+            text: 'tabindex="-1" on a visible <iframe> removes the embedded document from sequential focus order — sub-page becomes keyboard-unreachable from outside.'
+          });
+        }
+      }
+
+      // aria-hidden with content (heuristic).
+      if (entry.tag === "iframe" && iframe.getAttribute("aria-hidden") === "true") {
+        // Heuristic: non-trivial size and has src.
+        var hasSubstantialSize = entry.width >= 50 && entry.height >= 50;
+        if (hasSubstantialSize && (iframe.getAttribute("src") || iframe.getAttribute("srcdoc"))) {
+          entry.issues.push({
+            type: "aria-hidden-with-content",
+            text: 'aria-hidden="true" on a substantial iframe (' + entry.width + '×' + entry.height + ') hides its content from AT. If the embedded document has interactive elements, this creates a focusable-but-hidden trap.'
+          });
+        }
+      }
+
+      // Likely tracking iframe (very small, visible, no name, not hidden from AT).
+      if (entry.tag === "iframe" && !entry.hidden && !entry.ariaHidden && rect) {
+        if (isLikelyTracking(iframe, rect) && !entry.accName) {
+          entry.issues.push({
+            type: "likely-tracking-not-hidden",
+            text: 'Tiny / off-screen iframe (' + entry.width + '×' + entry.height + ') with no name and no aria-hidden — analytics/pixel iframes should be aria-hidden="true" so SR doesn\'t announce them.'
+          });
+        }
+      }
+
+      // role="presentation"/"none" on iframe.
+      var role = (entry.role || "").toLowerCase();
+      if (entry.tag === "iframe" && (role === "presentation" || role === "none") &&
+          (iframe.getAttribute("src") || iframe.getAttribute("srcdoc"))) {
+        entry.issues.push({
+          type: "role-presentation-on-iframe",
+          text: 'role="' + role + '" on an iframe with content strips its frame role. SR users lose the frame boundary announcement.'
+        });
+      }
+
+      return entry;
+    }
+
+    function walk(root) {
+      if (!root) return;
+      var iframes;
+      try {
+        iframes = root.querySelectorAll("iframe, frame, frameset");
+      } catch (e) {
+        iframes = [];
+      }
+      for (var i = 0; i < iframes.length; i++) {
+        results.push(analyseIframe(iframes[i]));
+      }
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var s = 0; s < all.length; s++) {
+        if (all[s].shadowRoot) {
+          shadowRoots++;
+          walk(all[s].shadowRoot);
+        }
+      }
+    }
+
+    walk(document);
+
+    return {
+      url: url,
+      isTop: isTop,
+      frameOrigin: frameOrigin,
+      results: results,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayIframes(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var anyError = null;
+    var totalFrames = 0;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      totalFrames++;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    // Cross-iframe duplicate-name detection.
+    var byName = {};
+    for (var di = 0; di < allResults.length; di++) {
+      var rr = allResults[di];
+      if (!rr.accName) continue;
+      var key = rr.accName.toLowerCase();
+      if (!byName[key]) byName[key] = [];
+      byName[key].push(rr);
+    }
+    Object.keys(byName).forEach(function (k) {
+      var arr = byName[k];
+      if (arr.length < 2) return;
+      arr.forEach(function (entry) {
+        var others = arr.filter(function (x) { return x !== entry; });
+        entry.issues.push({
+          type: "duplicate-name",
+          text: 'Multiple iframes share the name "' + entry.accName + '" (' + arr.length + ' total). SR users can\'t distinguish them.',
+          related: others.map(function (o) { return { idx: o.idx, sel: o.sel }; })
+        });
+      });
+    });
+
+    // Resolve elements (only top frame is reachable).
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var sameO = 0, crossO = 0, unknownO = 0, hiddenCount = 0, withIssues = 0, deprecated = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.tag !== "iframe") deprecated++;
+      else if (c.origin === "same") sameO++;
+      else if (c.origin === "cross") crossO++;
+      else unknownO++;
+      if (c.hidden || c.ariaHidden) hiddenCount++;
+      if (c.issues && c.issues.length) withIssues++;
+    }
+
+    // ---- on-page panel ----
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 480px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.same { background: #1a7f1a; color: #fff; }' +
+      '.chip.cross { background: #6f42c1; color: #fff; }' +
+      '.chip.unknown { background: #707070; color: #fff; }' +
+      '.chip.hidden { background: #707070; color: #fff; }' +
+      '.chip.tag { background: #003876; color: #fff; }' +
+      '.chip.deprecated { background: #b00020; color: #fff; }' +
+      '.chip.sandbox { background: #555; color: #fff; font-weight: 500; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.name.missing { color: #b00020; font-style: italic; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.src { font-family: ui-monospace, monospace !important; font-size: 12px; color: #555; word-break: break-all; margin-top: 4px; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-same li.row:not(.is-same) { display: none; }' +
+      '.panel.filter-cross li.row:not(.is-cross) { display: none; }' +
+      '.panel.filter-hidden li.row:not(.is-hidden) { display: none; }' +
+      '.panel.filter-deprecated li.row:not(.is-deprecated) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Iframes (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [];
+    summaryBits.push(sameO + " same-origin");
+    summaryBits.push(crossO + " cross-origin");
+    if (unknownO) summaryBits.push(unknownO + " unknown-origin");
+    if (deprecated) summaryBits.push(deprecated + " deprecated <frame>/<frameset>");
+    if (hiddenCount) summaryBits.push(hiddenCount + " hidden");
+    summaryBits.push(withIssues + " with issues");
+    summaryBits.push(totalFrames + " frame(s) scanned");
+
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="same">Same-origin (' + sameO + ')</button>' +
+            '<button data-filter="cross">Cross-origin (' + crossO + ')</button>' +
+            '<button data-filter="hidden">Hidden (' + hiddenCount + ')</button>' +
+            (deprecated ? '<button data-filter="deprecated">Deprecated (' + deprecated + ')</button>' : '') +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.origin === "same") classes.push("is-same");
+      if (t.origin === "cross") classes.push("is-cross");
+      if (t.hidden || t.ariaHidden) classes.push("is-hidden");
+      if (t.tag !== "iframe") classes.push("is-deprecated");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      // origin / tag chip
+      if (t.tag !== "iframe") {
+        html += '<span class="chip deprecated">&lt;' + t.tag + '&gt;</span>';
+      } else if (t.origin === "same") {
+        html += '<span class="chip same">SAME-ORIGIN</span>';
+      } else if (t.origin === "cross") {
+        html += '<span class="chip cross">CROSS-ORIGIN</span>';
+      } else {
+        html += '<span class="chip unknown">UNKNOWN</span>';
+      }
+
+      if (t.hidden) html += '<span class="chip hidden">DISPLAY-HIDDEN</span>';
+      else if (t.ariaHidden) html += '<span class="chip hidden">ARIA-HIDDEN</span>';
+
+      if (t.accName) {
+        html += '<span class="name">' + esc(t.accName) + '</span>';
+        if (t.accSource) html += ' <span style="color:#666; font-size:12px;">(' + esc(t.accSource) + ')</span>';
+      } else {
+        html += '<span class="name missing">(no accessible name)</span>';
+      }
+
+      // meta
+      var metaParts = [];
+      metaParts.push(t.width + "×" + t.height + " px");
+      if (t.tabindexRaw != null) metaParts.push("tabindex=" + t.tabindexRaw);
+      if (t.role) metaParts.push("role=" + t.role);
+      if (t._frameUrl && !t._frameIsTop) metaParts.push("in frame: " + t._frameUrl);
+      html += '<div class="meta">' + esc(metaParts.join(" · ")) + '</div>';
+
+      if (t.sandbox != null) {
+        var tokens = t.sandbox.split(/\s+/).filter(Boolean);
+        if (tokens.length === 0) {
+          html += '<div class="meta"><span class="chip sandbox">sandbox (empty — max restrictions)</span></div>';
+        } else {
+          var chips = tokens.map(function (tk) { return '<span class="chip sandbox">' + esc(tk) + '</span>'; }).join("");
+          html += '<div class="meta">' + chips + '</div>';
+        }
+      }
+
+      if (t.src) {
+        html += '<div class="src" title="' + esc(t.src) + '">src: ' + esc(t.src.length > 120 ? t.src.slice(0, 120) + "…" : t.src) + '</div>';
+      }
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          var issue = t.issues[ji];
+          var text = issue.text;
+          if (issue.related && issue.related.length) {
+            text += " (also: " + issue.related.map(function (rl) { return "#" + rl.idx; }).join(", ") + ")";
+          }
+          html += '<span class="issue">' + esc(text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    if (crossO) {
+      html += '<footer>Cross-origin iframes can\'t be introspected from this script — only their outer attributes (title, aria-label, etc.) are checked. The scanner runs inside each accessible frame and finds its own nested iframes; cross-origin frames inventory themselves and join the aggregated list.</footer>';
+    } else {
+      html += '<footer>WCAG 2.4.1 Bypass Blocks · 4.1.2 Name, Role, Value</footer>';
+    }
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    // Outline top-frame iframes.
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = (o.issues && o.issues.length) ? "#b00020" : "#003876";
+          o._resolveEl.style.setProperty("outline", "3px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Iframes\n\n";
+    md += "Counts: " + sameO + " same-origin, " + crossO + " cross-origin";
+    if (unknownO) md += ", " + unknownO + " unknown-origin";
+    if (deprecated) md += ", " + deprecated + " <frame>/<frameset>";
+    md += ", " + withIssues + " with issues across " + totalFrames + " frame(s).\n\n";
+    md += "| # | Tag | Origin | Name | Source | Size | tabindex | Issues | Selector | Src |\n";
+    md += "|---|-----|--------|------|--------|------|----------|--------|----------|-----|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var name = mt.accName ? mt.accName.replace(/\|/g, "\\|") : "";
+      var src = (mt.src || "").replace(/\|/g, "\\|");
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) {
+        var s = z.type;
+        if (z.related && z.related.length) s += "(also " + z.related.map(function (rr) { return "#" + rr.idx; }).join(",") + ")";
+        return s;
+      }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | " + mt.tag +
+            " | " + mt.origin +
+            " | " + name +
+            " | " + (mt.accSource || "") +
+            " | " + mt.width + "×" + mt.height +
+            " | " + (mt.tabindexRaw == null ? "" : mt.tabindexRaw) +
+            " | " + issueStr +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "`" +
+            " | " + (src.length > 100 ? src.slice(0, 100) + "…" : src) +
+            " |\n";
+    }
+
+    // ---- filter bar ----
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    // ---- drag ----
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Iframes check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
 }
