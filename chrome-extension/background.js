@@ -38,7 +38,9 @@ const CHECKS = {
   skiplinks: { label: "Skip links",       scan: scanSkipLinks, display: displaySkipLinks  },
   media:     { label: "Media",            scan: scanMedia,     display: displayMedia     },
   focusvis:  { label: "Focus visible",    scan: scanFocusVisible, display: displayFocusVisible },
-  reflow:    { label: "Reflow",           scan: scanReflow,    display: displayReflow    }
+  reflow:    { label: "Reflow",           scan: scanReflow,    display: displayReflow    },
+  nontext:   { label: "Non-text contrast", scan: scanNonTextContrast, display: displayNonTextContrast },
+  animation: { label: "Animation",        scan: scanAnimation, display: displayAnimation }
 };
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -14748,6 +14750,1710 @@ function displayReflow(framesData, checkId) {
       hostE.id = Pe + "host";
       hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
       hostE.textContent = "Reflow check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: NON-TEXT CONTRAST — WCAG 1.4.11 / 2.4.7
+ *
+ * Element-level focus-indicator contrast inspector. Programmatically
+ * focuses each interactive element with preventScroll, reads the
+ * computed focus-state styles, measures the focus indicator's contrast
+ * against the background, and unfocuses. Active element and scroll
+ * position are restored at the end.
+ *
+ * Rule families mirror auto_a11y (CNIB-AccessLabs):
+ *   Input*   — <input>, <textarea>, <select>
+ *   Button*  — <button>, <input type=button|submit|reset|image>, [role=button]
+ *   Link*    — <a href>, [role=link]
+ *   Tabindex* — non-interactive host with tabindex ≥ 0
+ *   Handler* — non-interactive host with inline interaction handler
+ *
+ * Status per element:
+ *   pass                    focus-indicator contrast ≥ 3:1
+ *   focus-contrast-fail     focus-indicator contrast < 3:1 (Err*FocusContrastFail)
+ *   transparent-outline     outline-color alpha < 0.5 (Err*TransparentOutline / WarnInputTransparentFocus)
+ *   gradient-bg             element bg is a CSS gradient
+ *   image-bg                element bg is a background-image
+ *   parent-gradient-bg      transparent element over gradient parent
+ *   parent-image-bg         transparent element over image parent
+ *   z-index-floating        z-index element with transparent bg
+ *   outline-exceeds-parent  outline-width + offset > parent dimensions
+ *   no-focus-indicator      no visible focus change (outline none + no replacement)
+ * ==================================================================== */
+
+function scanNonTextContrast() {
+  "use strict";
+  try {
+    var results = [];
+    var shadowRoots = 0;
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+    var elementsProcessed = 0;
+
+    var INTERACTIVE_ARIA_ROLES = {
+      button: 1, link: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1,
+      tab: 1, option: 1, checkbox: 1, radio: 1, switch: 1, treeitem: 1,
+      gridcell: 1, slider: 1, spinbutton: 1, combobox: 1
+    };
+    var CLICK_ATTRS = ["onclick", "onmousedown", "onmouseup", "onpointerdown", "onpointerup"];
+
+    /* ---- helpers ---- */
+    function txt(el) {
+      if (!el) return "";
+      return (el.textContent || "").replace(/\s+/g, " ").trim();
+    }
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+    function isHidden(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var n = el; n && n.nodeType === 1; n = n.parentNode || (n.getRootNode && n.getRootNode().host)) {
+        var cs;
+        try { cs = getComputedStyle(n); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.display === "none" || cs.visibility === "hidden") return true;
+      }
+      return false;
+    }
+
+    /* ---- color parsing ---- */
+    function parseColor(str) {
+      // Returns { r, g, b, a } in 0..255 / 0..1 or null
+      if (!str || str === "transparent" || str === "currentcolor") return null;
+      var m;
+      m = str.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+%?))?\s*\)$/i);
+      if (m) {
+        var a = m[4] == null ? 1 : (m[4].slice(-1) === "%" ? parseFloat(m[4]) / 100 : parseFloat(m[4]));
+        return { r: +m[1], g: +m[2], b: +m[3], a: a };
+      }
+      m = str.match(/^#([0-9a-f]{3,8})$/i);
+      if (m) {
+        var hex = m[1];
+        if (hex.length === 3) hex = hex.split("").map(function (c) { return c + c; }).join("");
+        if (hex.length === 4) hex = hex.split("").map(function (c) { return c + c; }).join("");
+        if (hex.length === 6) return { r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16), a: 1 };
+        if (hex.length === 8) return { r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16), a: parseInt(hex.slice(6, 8), 16) / 255 };
+      }
+      return null;
+    }
+    function relLuminance(c) {
+      function chan(x) {
+        x = x / 255;
+        return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+      }
+      return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+    }
+    function contrastRatio(c1, c2) {
+      var l1 = relLuminance(c1), l2 = relLuminance(c2);
+      var hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+    function composite(over, under) {
+      // Porter-Duff source-over: result = over*a + under*(1-a)
+      var a = over.a;
+      return {
+        r: Math.round(over.r * a + under.r * (1 - a)),
+        g: Math.round(over.g * a + under.g * (1 - a)),
+        b: Math.round(over.b * a + under.b * (1 - a)),
+        a: a + under.a * (1 - a)
+      };
+    }
+
+    /* ---- background resolution ---- */
+    function detectBgKind(el) {
+      // Returns { kind: 'solid'|'gradient'|'image'|'transparent'|'unknown', color: rgba or null }
+      try {
+        var cs = getComputedStyle(el);
+        var bgImage = cs.backgroundImage;
+        var bgColor = cs.backgroundColor;
+        if (bgImage && bgImage !== "none") {
+          if (/linear-gradient|radial-gradient|conic-gradient|repeating-/.test(bgImage)) {
+            return { kind: "gradient", color: parseColor(bgColor) };
+          }
+          if (/^url\(/.test(bgImage)) {
+            return { kind: "image", color: parseColor(bgColor) };
+          }
+        }
+        var col = parseColor(bgColor);
+        if (!col) return { kind: "transparent", color: null };
+        if (col.a < 0.01) return { kind: "transparent", color: col };
+        if (col.a < 1) return { kind: "semi-transparent", color: col };
+        return { kind: "solid", color: col };
+      } catch (e) {
+        return { kind: "unknown", color: null };
+      }
+    }
+
+    function resolveBackground(el) {
+      // Returns { effective: rgba, kind: 'solid'|'gradient'|'image'|...,
+      //          ancestorKind: 'gradient'|'image'|null, hasZIndexFloating: bool }
+      var node = el;
+      var accum = null;
+      var ancestorKind = null;
+      var hasZIndexFloating = false;
+      var hops = 0;
+      while (node && node.nodeType === 1 && hops < 30) {
+        hops++;
+        var info = detectBgKind(node);
+        // z-index detection
+        try {
+          var nodeCS = getComputedStyle(node);
+          if (nodeCS && nodeCS.zIndex && nodeCS.zIndex !== "auto" && parseInt(nodeCS.zIndex, 10) !== 0) {
+            if (info.kind === "transparent" || info.kind === "semi-transparent") {
+              hasZIndexFloating = true;
+            }
+          }
+        } catch (e) {}
+        if (info.kind === "gradient" || info.kind === "image") {
+          if (node === el) {
+            return { effective: null, kind: info.kind, ancestorKind: null, hasZIndexFloating: hasZIndexFloating };
+          } else {
+            return { effective: null, kind: "transparent", ancestorKind: info.kind, hasZIndexFloating: hasZIndexFloating };
+          }
+        }
+        if (info.kind === "solid") {
+          var color = info.color;
+          if (accum) color = composite(accum, color);
+          return { effective: color, kind: "solid", ancestorKind: null, hasZIndexFloating: hasZIndexFloating };
+        }
+        if (info.kind === "semi-transparent") {
+          accum = accum ? composite(accum, info.color) : info.color;
+        }
+        node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+      }
+      // Root fallback: white.
+      var white = { r: 255, g: 255, b: 255, a: 1 };
+      var final = accum ? composite(accum, white) : white;
+      return { effective: final, kind: "solid", ancestorKind: null, hasZIndexFloating: hasZIndexFloating };
+    }
+
+    /* ---- focus-indicator extraction ---- */
+    function focusedIndicator(el) {
+      // Reads computed style assuming element is currently focused.
+      var cs;
+      try { cs = getComputedStyle(el); } catch (e) { return null; }
+      if (!cs) return null;
+      var outlineStyle = cs.outlineStyle;
+      var outlineWidth = parseFloat(cs.outlineWidth) || 0;
+      var outlineColor = cs.outlineColor;
+      var outlineOffset = parseFloat(cs.outlineOffset) || 0;
+      var boxShadow = cs.boxShadow;
+      var border = cs.border;
+      var color = null;
+      var source = "";
+      var alpha = 1;
+      // Prefer outline if visible.
+      if (outlineStyle !== "none" && outlineWidth > 0) {
+        color = parseColor(outlineColor);
+        source = "outline";
+      }
+      // Box-shadow as fallback
+      if (!color && boxShadow && boxShadow !== "none") {
+        // box-shadow may be "rgba(...) 0px 0px 0px 3px ..." — parse first colour.
+        var m = boxShadow.match(/(rgba?\([^)]+\)|#[0-9a-f]+|[a-z]+)/i);
+        if (m) {
+          color = parseColor(m[1]);
+          source = "box-shadow";
+        }
+      }
+      if (color) alpha = color.a == null ? 1 : color.a;
+      return {
+        outlineStyle: outlineStyle,
+        outlineWidth: outlineWidth,
+        outlineColor: outlineColor,
+        outlineOffset: outlineOffset,
+        boxShadow: boxShadow,
+        indicatorColor: color,
+        source: source,
+        alpha: alpha
+      };
+    }
+
+    /* ---- element classification ---- */
+    function classifyElement(el) {
+      var tag = el.tagName;
+      if (tag === "INPUT") {
+        var type = (el.getAttribute("type") || "text").toLowerCase();
+        if (type === "button" || type === "submit" || type === "reset" || type === "image") return "Button";
+        return "Input";
+      }
+      if (tag === "TEXTAREA" || tag === "SELECT") return "Input";
+      if (tag === "BUTTON") return "Button";
+      if (tag === "A" && el.hasAttribute("href")) return "Link";
+      var role = (el.getAttribute("role") || "").toLowerCase();
+      if (role === "button") return "Button";
+      if (role === "link") return "Link";
+      // tabindex on a non-interactive host
+      if (el.hasAttribute && el.hasAttribute("tabindex")) {
+        var ti = parseInt(el.getAttribute("tabindex"), 10);
+        if (isFinite(ti) && ti >= 0) return "Tabindex";
+      }
+      // inline interaction handler
+      for (var i = 0; i < CLICK_ATTRS.length; i++) {
+        if (el.hasAttribute(CLICK_ATTRS[i])) return "Handler";
+      }
+      // role-with-tabindex was already caught above
+      return null;
+    }
+    function isInteractiveCandidate(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.hasAttribute && el.hasAttribute("disabled")) return false;
+      if (el.getAttribute && el.getAttribute("aria-disabled") === "true") return false;
+      if (isHidden(el)) return false;
+      var c = classifyElement(el);
+      return !!c;
+    }
+
+    function isFocusable(el) {
+      // We rely on the DOM to actually focus, but skip obviously non-focusable
+      // hosts and ones where focus() would no-op (e.g. tabindex="-1" elements
+      // *can* be focused programmatically, so we still process those).
+      try {
+        var ti = el.getAttribute("tabindex");
+        if (ti && parseInt(ti, 10) < 0) {
+          // Skip programmatically-only focusable hosts; they aren't user-keyboard-reachable
+          // (Tabindex check covers those).
+          return false;
+        }
+      } catch (e) {}
+      return true;
+    }
+
+    /* ---- main loop ---- */
+    // Save state before mutating focus / scroll.
+    var savedActive = document.activeElement;
+    var savedScrollX = 0, savedScrollY = 0;
+    try { savedScrollX = window.scrollX; savedScrollY = window.scrollY; } catch (e) {}
+
+    function analyseElement(el, category) {
+      elementsProcessed++;
+      var name = txt(el).slice(0, 70);
+      // accessible name fallback for inputs
+      if (!name) {
+        var al = el.getAttribute("aria-label");
+        if (al) name = al.slice(0, 70);
+        else if (el.tagName === "INPUT") {
+          var v = el.getAttribute("value") || el.getAttribute("placeholder") || "";
+          name = v.slice(0, 70);
+        }
+      }
+
+      var entry = {
+        idx: ++idCounter,
+        sel: uniqueSelector(el),
+        tag: el.tagName.toLowerCase(),
+        category: category,
+        role: (el.getAttribute("role") || "").toLowerCase(),
+        accName: name,
+        status: "pass",
+        ratio: null,
+        indicatorColor: "",
+        indicatorAlpha: null,
+        indicatorSource: "",
+        backgroundColor: "",
+        backgroundKind: "",
+        ancestorBgKind: null,
+        outlineWidth: 0,
+        outlineOffset: 0,
+        outlineStyle: "",
+        issues: [],
+        _resolveSel: uniqueSelector(el)
+      };
+
+      // Resolve background BEFORE focusing (focus state can sometimes change bg).
+      var bg = resolveBackground(el);
+      entry.backgroundColor = bg.effective ? "rgba(" + bg.effective.r + ", " + bg.effective.g + ", " + bg.effective.b + ", " + bg.effective.a.toFixed(2) + ")" : "(could not resolve)";
+      entry.backgroundKind = bg.kind;
+      entry.ancestorBgKind = bg.ancestorKind;
+
+      // Focus the element and read its :focus computed style.
+      var focused = false;
+      try {
+        el.focus({ preventScroll: true });
+        focused = (document.activeElement === el);
+      } catch (e) {}
+      var ind = focusedIndicator(el);
+      try { el.blur(); } catch (e) {}
+
+      if (!ind) {
+        entry.status = "no-focus-indicator";
+        entry.issues.push({
+          type: category + "FocusContrastUnknown",
+          text: "Couldn't read computed styles after programmatic focus."
+        });
+        return entry;
+      }
+
+      entry.outlineWidth = ind.outlineWidth;
+      entry.outlineOffset = ind.outlineOffset;
+      entry.outlineStyle = ind.outlineStyle;
+      entry.indicatorSource = ind.source;
+      entry.indicatorAlpha = ind.alpha;
+      if (ind.indicatorColor) {
+        entry.indicatorColor = "rgba(" + ind.indicatorColor.r + ", " + ind.indicatorColor.g + ", " + ind.indicatorColor.b + ", " + ind.indicatorColor.a.toFixed(2) + ")";
+      }
+
+      // No focus indicator at all?
+      if (!ind.indicatorColor || (ind.outlineStyle === "none" && (!ind.boxShadow || ind.boxShadow === "none"))) {
+        entry.status = "no-focus-indicator";
+        entry.issues.push({
+          type: category + "NoFocusIndicator",
+          text: "Element has no visible focus indicator: outline-style is \"" + ind.outlineStyle + "\" and box-shadow is \"" + (ind.boxShadow || "none") + "\". See Focus visible check for the source rule. WCAG 2.4.7 / 1.4.11."
+        });
+        return entry;
+      }
+
+      // Cannot-verify warnings (in priority order so the worst surfaces first).
+      if (bg.kind === "gradient") {
+        entry.status = "gradient-bg";
+        entry.issues.push({
+          type: "Warn" + category + "FocusGradientBackground",
+          text: category + " has a CSS gradient background. Focus-indicator contrast varies across the gradient — automated 3:1 check not reliable. Manual review needed."
+        });
+        return entry;
+      }
+      if (bg.kind === "image") {
+        entry.status = "image-bg";
+        entry.issues.push({
+          type: "Warn" + category + "FocusImageBackground",
+          text: category + " has a background image. Focus-indicator contrast over arbitrary image pixels can't be verified. Manual review needed."
+        });
+        return entry;
+      }
+      if (bg.ancestorKind === "gradient") {
+        entry.status = "parent-gradient-bg";
+        entry.issues.push({
+          type: "Warn" + category + "FocusParentGradientBackground",
+          text: category + " has a transparent background over a gradient ancestor. Focus-indicator contrast varies across the gradient — manual review needed."
+        });
+        return entry;
+      }
+      if (bg.ancestorKind === "image") {
+        entry.status = "parent-image-bg";
+        entry.issues.push({
+          type: "Warn" + category + "FocusParentImageBackground",
+          text: category + " has a transparent background over an image ancestor. Focus-indicator contrast can't be verified — manual review needed."
+        });
+        return entry;
+      }
+      if (bg.hasZIndexFloating) {
+        entry.status = "z-index-floating";
+        entry.issues.push({
+          type: "Warn" + category + "FocusZIndexFloating",
+          text: category + " (or an ancestor) has a z-index with transparent background. The element floats over content that the scanner can't predict — focus-indicator contrast unverifiable."
+        });
+        return entry;
+      }
+      if (ind.alpha < 0.5) {
+        entry.status = "transparent-outline";
+        entry.issues.push({
+          type: (category === "Input" ? "WarnInputTransparentFocus" : "Err" + category + "TransparentOutline"),
+          text: "Focus indicator (" + ind.source + ") has alpha " + ind.alpha.toFixed(2) + " (< 0.5). Semi-transparent indicators can't guarantee 3:1 contrast in all contexts."
+        });
+        return entry;
+      }
+
+      // Outline extends beyond parent?
+      try {
+        var parent = el.parentElement;
+        if (parent) {
+          var parentRect = parent.getBoundingClientRect();
+          var elRect = el.getBoundingClientRect();
+          var totalOutline = ind.outlineWidth + Math.abs(ind.outlineOffset);
+          if (
+            elRect.left - totalOutline < parentRect.left - 1 ||
+            elRect.right + totalOutline > parentRect.right + 1 ||
+            elRect.top - totalOutline < parentRect.top - 1 ||
+            elRect.bottom + totalOutline > parentRect.bottom + 1
+          ) {
+            // Only flag if the parent has a different background that could hide the outline.
+            var parentBg = detectBgKind(parent);
+            if (parentBg.kind !== bg.kind || (parentBg.color && bg.effective && (
+                parentBg.color.r !== bg.effective.r ||
+                parentBg.color.g !== bg.effective.g ||
+                parentBg.color.b !== bg.effective.b))) {
+              entry.issues.push({
+                type: "Warn" + category + "FocusOutlineExceedsParent",
+                text: "Focus outline (width " + ind.outlineWidth + "px, offset " + ind.outlineOffset + "px) extends beyond the parent's bounds. Outline contrast beyond parent can't be verified."
+              });
+              // Continue to do contrast against the resolved background as informational.
+            }
+          }
+        }
+      } catch (e) {}
+
+      // Compute contrast.
+      if (!ind.indicatorColor || !bg.effective) {
+        entry.status = "cannot-calculate";
+        entry.issues.push({
+          type: "Warn" + category + "FocusContrastUnknown",
+          text: "Couldn't determine indicator color or background — contrast unverifiable."
+        });
+        return entry;
+      }
+      // Composite the indicator over the background if alpha < 1.
+      var indEffective = ind.indicatorColor;
+      if (indEffective.a < 1) {
+        indEffective = composite(indEffective, bg.effective);
+      }
+      var ratio = contrastRatio(indEffective, bg.effective);
+      entry.ratio = ratio;
+      if (ratio < 3) {
+        entry.status = "focus-contrast-fail";
+        entry.issues.push({
+          type: "Err" + category + "FocusContrastFail",
+          text: "Focus-indicator contrast " + ratio.toFixed(2) + ":1 (< 3:1 required). Indicator " + entry.indicatorColor + " over background " + entry.backgroundColor + ". WCAG 1.4.11 + 2.4.7."
+        });
+      } else {
+        entry.status = "pass";
+      }
+      return entry;
+    }
+
+    function walk(root) {
+      if (!root) return;
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { return; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.shadowRoot) {
+          shadowRoots++;
+          walk(el.shadowRoot);
+        }
+        if (!isInteractiveCandidate(el)) continue;
+        if (!isFocusable(el)) continue;
+        var cat = classifyElement(el);
+        if (!cat) continue;
+        try {
+          results.push(analyseElement(el, cat));
+        } catch (e) {
+          results.push({
+            idx: ++idCounter,
+            sel: uniqueSelector(el),
+            tag: el.tagName.toLowerCase(),
+            category: cat,
+            status: "error",
+            accName: txt(el).slice(0, 60),
+            issues: [{ type: "ScanError", text: "Scan error: " + (e && e.message ? e.message : String(e)) }],
+            _resolveSel: uniqueSelector(el)
+          });
+        }
+      }
+    }
+
+    walk(document);
+
+    // Restore focus + scroll.
+    try {
+      if (savedActive && savedActive.focus) savedActive.focus({ preventScroll: true });
+      else if (document.body && document.body.blur) document.body.blur();
+    } catch (e) {}
+    try { window.scrollTo(savedScrollX, savedScrollY); } catch (e) {}
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      shadowRoots: shadowRoots,
+      elementsProcessed: elementsProcessed
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayNonTextContrast(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var totalShadow = 0;
+    var totalProcessed = 0;
+    var anyError = null;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      if (!fd.results) continue;
+      totalShadow += (fd.shadowRoots || 0);
+      totalProcessed += (fd.elementsProcessed || 0);
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var passCount = 0, failCount = 0, transparentCount = 0, gradientCount = 0, imageCount = 0,
+        zFloatCount = 0, parentBgCount = 0, noIndCount = 0, otherWarn = 0, withIssues = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.status === "pass") passCount++;
+      else if (c.status === "focus-contrast-fail") failCount++;
+      else if (c.status === "transparent-outline") transparentCount++;
+      else if (c.status === "gradient-bg") gradientCount++;
+      else if (c.status === "image-bg") imageCount++;
+      else if (c.status === "z-index-floating") zFloatCount++;
+      else if (c.status === "parent-gradient-bg" || c.status === "parent-image-bg") parentBgCount++;
+      else if (c.status === "no-focus-indicator") noIndCount++;
+      else otherWarn++;
+      if (c.issues && c.issues.length) withIssues++;
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 540px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.pass { background: #1a7f1a; color: #fff; }' +
+      '.chip.fail { background: #b00020; color: #fff; }' +
+      '.chip.warn { background: #d97706; color: #fff; }' +
+      '.chip.info { background: #555; color: #fff; font-weight: 500; }' +
+      '.chip.cat { background: #003876; color: #fff; }' +
+      '.swatch { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; border: 1px solid #555; margin-right: 2px; border-radius: 2px; }' +
+      '.name { color: #003876; font-weight: 600; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.colors { font-family: ui-monospace, monospace !important; font-size: 12px; margin-top: 4px; }' +
+      '.sel { font-family: ui-monospace, monospace !important; font-size: 12px; color: #444; word-break: break-all; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.issue.warn { background: #fff5e1; color: #7a4a00; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-fail li.row:not(.is-fail) { display: none; }' +
+      '.panel.filter-pass li.row:not(.is-pass) { display: none; }' +
+      '.panel.filter-transparent li.row:not(.is-transparent) { display: none; }' +
+      '.panel.filter-cantverify li.row:not(.is-cantverify) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Non-text contrast (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      totalProcessed + " interactive elements scanned",
+      passCount + " pass",
+      failCount ? (failCount + " fail") : null,
+      transparentCount ? (transparentCount + " transparent indicator") : null,
+      (gradientCount + imageCount + parentBgCount + zFloatCount) ? ((gradientCount + imageCount + parentBgCount + zFloatCount) + " can't verify") : null,
+      noIndCount ? (noIndCount + " no indicator") : null
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    var cantVerifyCount = gradientCount + imageCount + parentBgCount + zFloatCount;
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="fail">Fail (' + failCount + ')</button>' +
+            '<button data-filter="transparent">Transparent (' + transparentCount + ')</button>' +
+            '<button data-filter="cantverify">Cannot verify (' + cantVerifyCount + ')</button>' +
+            '<button data-filter="pass">Pass (' + passCount + ')</button>' +
+            '</div>';
+
+    function statusChip(status) {
+      switch (status) {
+        case "pass": return { cls: "pass", label: "PASS" };
+        case "focus-contrast-fail": return { cls: "fail", label: "FAIL < 3:1" };
+        case "transparent-outline": return { cls: "warn", label: "TRANSPARENT OUTLINE" };
+        case "gradient-bg": return { cls: "warn", label: "GRADIENT BG" };
+        case "image-bg": return { cls: "warn", label: "IMAGE BG" };
+        case "parent-gradient-bg": return { cls: "warn", label: "PARENT GRADIENT" };
+        case "parent-image-bg": return { cls: "warn", label: "PARENT IMAGE" };
+        case "z-index-floating": return { cls: "warn", label: "Z-INDEX FLOATING" };
+        case "no-focus-indicator": return { cls: "fail", label: "NO FOCUS INDICATOR" };
+        case "cannot-calculate": return { cls: "info", label: "CANNOT CALC" };
+        case "error": return { cls: "info", label: "ERROR" };
+        default: return { cls: "info", label: status };
+      }
+    }
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      if (t.status === "pass") classes.push("is-pass");
+      if (t.status === "focus-contrast-fail") classes.push("is-fail");
+      if (t.status === "transparent-outline") classes.push("is-transparent");
+      if (t.status === "gradient-bg" || t.status === "image-bg" || t.status === "parent-gradient-bg" ||
+          t.status === "parent-image-bg" || t.status === "z-index-floating") classes.push("is-cantverify");
+
+      var sc = statusChip(t.status);
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+      html += '<span class="chip cat">' + esc(t.category) + '</span>';
+      html += '<span class="chip ' + sc.cls + '">' + sc.label + '</span>';
+      if (t.ratio != null) html += '<span class="chip info">' + t.ratio.toFixed(2) + ':1</span>';
+
+      var tagDesc = "<" + t.tag + (t.role ? ' role="' + esc(t.role) + '"' : '') + ">";
+      html += '<span style="font-family: ui-monospace, monospace; font-size: 13px; color:#555;">' + esc(tagDesc) + '</span>';
+
+      if (t.accName) html += '<div class="name">' + esc(t.accName) + '</div>';
+
+      // colors block
+      if (t.indicatorColor || t.backgroundColor) {
+        html += '<div class="colors">';
+        if (t.indicatorColor) {
+          html += '<span class="swatch" style="background:' + esc(t.indicatorColor) + ';"></span> indicator: ' + esc(t.indicatorColor) +
+                  (t.indicatorSource ? " (" + esc(t.indicatorSource) + ")" : "") + '<br>';
+        }
+        if (t.backgroundColor) {
+          html += '<span class="swatch" style="background:' + esc(t.backgroundColor) + ';"></span> background: ' + esc(t.backgroundColor) +
+                  (t.ancestorBgKind ? " (ancestor: " + esc(t.ancestorBgKind) + ")" : "") + '';
+        }
+        html += '</div>';
+      }
+      if (t.outlineWidth || t.outlineStyle) {
+        html += '<div class="meta">outline: ' + esc(t.outlineStyle) + " " + t.outlineWidth + "px (offset " + t.outlineOffset + "px)</div>";
+      }
+      html += '<div class="sel">' + esc(t.sel) + '</div>';
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          var icls = /^Warn|FocusContrastUnknown/.test(t.issues[ji].type) ? "issue warn" : "issue";
+          html += '<span class="' + icls + '"><strong>' + esc(t.issues[ji].type) + '</strong>: ' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 1.4.11 Non-text Contrast · 2.4.7 Focus Visible. Method: programmatically focus each interactive element (preventScroll), read computed styles, measure indicator-vs-background contrast, blur. Active element and scroll restored at end. Background resolution: Porter-Duff source-over compositing up the DOM, stops at first opaque ancestor, defaults to white at root. Rule prefix follows auto_a11y conventions (Err*/Warn*) for cross-tool consistency.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = "#003876";
+          if (o.status === "focus-contrast-fail" || o.status === "no-focus-indicator") color = "#b00020";
+          else if (o.status === "transparent-outline" || o.status === "gradient-bg" || o.status === "image-bg" ||
+                   o.status === "parent-gradient-bg" || o.status === "parent-image-bg" || o.status === "z-index-floating") color = "#d97706";
+          else if (o.status === "pass") color = "#1a7f1a";
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Non-text contrast\n\n";
+    md += "Scanned " + totalProcessed + " interactive elements. " + passCount + " pass, " + failCount + " fail, " +
+          transparentCount + " transparent, " + cantVerifyCount + " cannot verify, " + noIndCount + " no indicator.\n\n";
+    md += "| # | Category | Status | Ratio | Indicator | Background | Selector | Issues |\n";
+    md += "|---|----------|--------|-------|-----------|------------|----------|--------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var ratStr = mt.ratio == null ? "—" : mt.ratio.toFixed(2) + ":1";
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | " + mt.category +
+            " | " + mt.status +
+            " | " + ratStr +
+            " | " + (mt.indicatorColor || "").replace(/\|/g, "\\|") +
+            " | " + (mt.backgroundColor || "").replace(/\|/g, "\\|") +
+            " | `" + mt.sel.replace(/\|/g, "\\|") + "`" +
+            " | " + issueStr + " |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Non-text Contrast check failed: " + (e && e.message ? e.message : String(e));
+      document.documentElement.appendChild(hostE);
+      setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
+    } catch (e2) {}
+  }
+}
+
+/* ====================================================================
+ * CHECK: ANIMATION — WCAG 2.2.2 / 2.3.1 / 2.3.3
+ *
+ * Inventories every CSS animation on the page plus the obsolete
+ * <marquee> and <blink> elements and animated-GIF candidates. Rule
+ * IDs follow auto_a11y (CNIB-AccessLabs) conventions so findings are
+ * portable between tools.
+ *
+ * Statically tractable:
+ *   ErrInfiniteAnimation              animation-iteration-count: infinite
+ *   WarnInfiniteAnimationLikelySpinner  same, but element looks like a spinner
+ *   WarnLongAnimation                 animation-duration > 5s
+ *   WarnProblematicAnimation          keyframes have flash/translate/rotate patterns
+ *   ErrNoReducedMotionSupport         animations exist but no
+ *                                     @media (prefers-reduced-motion) anywhere
+ *   ErrMarqueeElement / ErrBlinkElement  obsolete intrinsic-motion elements
+ *   InfoAnimatedGifCandidate          <img src="*.gif"> (can't verify animation
+ *                                     without decoding the image data)
+ *
+ * Not implemented (out of scope for static inspection):
+ *   - JS setInterval / setTimeout / requestAnimationFrame loops
+ *   - Carousel detection (too heuristic without ML)
+ *   - GIF actual-animation verification (would need image decoding)
+ * ==================================================================== */
+
+function scanAnimation() {
+  "use strict";
+  try {
+    var results = [];
+    var pageIssues = [];
+    var url = location.href;
+    var isTop = (function () { try { return window.top === window.self; } catch (e) { return false; } })();
+    var idCounter = 0;
+    var totalSheets = 0;
+    var untestableSheets = 0;
+    var totalRules = 0;
+    var shadowRoots = 0;
+    var hasReducedMotionRule = false;
+    var hasReducedMotionAnimations = false; // animations inside a reduced-motion media rule
+    var keyframesByName = {}; // name -> { sheetUrl, frames: [ { keyText, style: { property: value } } ] }
+
+    /* ---- helpers ---- */
+    function uniqueSelector(el) {
+      if (!el || el.nodeType !== 1) return "";
+      var path = [];
+      var node = el;
+      while (node && node.nodeType === 1) {
+        if (node.id) { path.unshift("#" + CSS.escape(node.id)); break; }
+        var name = node.tagName.toLowerCase();
+        var parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          var i = 1, sib = node.previousElementSibling;
+          while (sib) {
+            if (sib.tagName === node.tagName) i++;
+            sib = sib.previousElementSibling;
+          }
+          name += ":nth-of-type(" + i + ")";
+        }
+        path.unshift(name);
+        node = parent;
+        if (!node || (node && node.nodeType === 11)) break;
+      }
+      return path.join(" > ");
+    }
+    function durationToSeconds(str) {
+      if (!str) return 0;
+      var trimmed = str.trim();
+      if (trimmed === "0" || trimmed === "0s" || trimmed === "0ms") return 0;
+      var m = trimmed.match(/^(-?[\d.]+)(s|ms)$/);
+      if (!m) return 0;
+      return m[2] === "ms" ? parseFloat(m[1]) / 1000 : parseFloat(m[1]);
+    }
+    function isSpinnerLike(el) {
+      if (!el) return false;
+      var cls = (el.className && el.className.baseVal != null ? el.className.baseVal : (el.className || "")).toString().toLowerCase();
+      if (/\b(?:spinner|loader|loading|busy|progress|progressbar|throbber|preloader|preload|spin|ring|dots)\b/.test(cls)) return true;
+      var role = (el.getAttribute && el.getAttribute("role") || "").toLowerCase();
+      if (role === "progressbar" || role === "status") return true;
+      var aria = (el.getAttribute && el.getAttribute("aria-label") || "").toLowerCase();
+      if (/loading|please wait|spinner/.test(aria)) return true;
+      // Small square element is usually a spinner.
+      try {
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.width <= 100 && rect.height <= 100 &&
+            Math.abs(rect.width - rect.height) <= 10) return true;
+      } catch (e) {}
+      return false;
+    }
+
+    /* ---- keyframes pattern analysis ---- */
+    function analyseKeyframes(frames, duration) {
+      // Returns an array of issue tags found.
+      var tags = [];
+      if (!frames || frames.length === 0) return tags;
+      var opacities = [];
+      var translateX = [], translateY = [];
+      var rotates = [];
+      for (var i = 0; i < frames.length; i++) {
+        var s = frames[i].style;
+        if (!s) continue;
+        if (s.opacity != null) {
+          var op = parseFloat(s.opacity);
+          if (isFinite(op)) opacities.push(op);
+        }
+        if (s.transform) {
+          var tr = s.transform;
+          // translate
+          var tmx = tr.match(/translate(?:X|3d)?\(\s*(-?[\d.]+)px/);
+          if (tmx) translateX.push(Math.abs(parseFloat(tmx[1])));
+          var tmy = tr.match(/translateY\(\s*(-?[\d.]+)px/);
+          if (tmy) translateY.push(Math.abs(parseFloat(tmy[1])));
+          var tmt = tr.match(/translate\(\s*(-?[\d.]+)px(?:[\s,]+(-?[\d.]+)px)?/);
+          if (tmt) {
+            translateX.push(Math.abs(parseFloat(tmt[1])));
+            if (tmt[2]) translateY.push(Math.abs(parseFloat(tmt[2])));
+          }
+          // rotate
+          var rot = tr.match(/rotate(?:3d)?\(/);
+          if (rot) rotates.push(1);
+        }
+      }
+      // Flash detection: opacity toggles between < 0.3 and > 0.7 in a fast animation (≤1s).
+      if (opacities.length >= 2) {
+        var min = Math.min.apply(null, opacities), max = Math.max.apply(null, opacities);
+        if (max - min >= 0.4 && duration > 0 && duration <= 1) {
+          tags.push({ tag: "flash-opacity", text: "opacity flashes between " + min + " and " + max + " in a " + duration + "s animation — could trigger seizures (WCAG 2.3.1)." });
+        }
+      }
+      // Translate (shaking).
+      var maxTx = translateX.length ? Math.max.apply(null, translateX) : 0;
+      var maxTy = translateY.length ? Math.max.apply(null, translateY) : 0;
+      if (Math.max(maxTx, maxTy) >= 15 && duration > 0 && duration <= 1) {
+        tags.push({ tag: "shake-translate", text: "translate amplitude " + Math.round(Math.max(maxTx, maxTy)) + "px over " + duration + "s — looks like shaking (vestibular trigger)." });
+      }
+      // Rotation in fast animation.
+      if (rotates.length > 0 && duration > 0 && duration <= 1) {
+        tags.push({ tag: "fast-rotate", text: "fast rotation (" + duration + "s) detected; verify it isn't disorienting." });
+      }
+      return tags;
+    }
+
+    /* ---- stylesheet walk ---- */
+    function recordAnimationRule(rule, sheetUrl, rulePath, insideReducedMotion) {
+      totalRules++;
+      var style = rule.style;
+      if (!style) return;
+      var animName = style.getPropertyValue("animation-name") || "";
+      var animDuration = style.getPropertyValue("animation-duration") || "";
+      var animIteration = style.getPropertyValue("animation-iteration-count") || "";
+      var animPlayState = style.getPropertyValue("animation-play-state") || "";
+      var animDelay = style.getPropertyValue("animation-delay") || "";
+      var transitionDuration = style.getPropertyValue("transition-duration") || "";
+      var transitionProperty = style.getPropertyValue("transition-property") || "";
+
+      var hasAnimation = animName && animName !== "none";
+      var hasLongTransition = false;
+      if (transitionDuration) {
+        var secs = transitionDuration.split(",").map(function (s) { return durationToSeconds(s.trim()); });
+        for (var k = 0; k < secs.length; k++) {
+          if (secs[k] > 5) { hasLongTransition = true; break; }
+        }
+      }
+
+      if (!hasAnimation && !hasLongTransition) return;
+
+      if (insideReducedMotion) {
+        hasReducedMotionAnimations = true;
+        return; // don't flag rules inside @media (prefers-reduced-motion)
+      }
+
+      // Each animation declaration may include multiple comma-separated values.
+      var names = animName.split(",").map(function (s) { return s.trim(); });
+      var durations = animDuration.split(",").map(function (s) { return s.trim(); });
+      var iterations = animIteration.split(",").map(function (s) { return s.trim(); });
+      var firstEl = null;
+      var representativeSel = "";
+      try {
+        var sel = rule.selectorText;
+        var firstSel = sel.split(",")[0].trim();
+        // Strip any pseudo we don't support.
+        firstEl = document.querySelector(firstSel);
+        if (firstEl) representativeSel = uniqueSelector(firstEl);
+      } catch (e) {}
+
+      for (var ni = 0; ni < names.length; ni++) {
+        var name = names[ni] || "none";
+        if (name === "none") continue;
+        var dur = durations[Math.min(ni, durations.length - 1)] || "";
+        var iter = iterations[Math.min(ni, iterations.length - 1)] || "";
+        var durSec = durationToSeconds(dur);
+        var entry = {
+          idx: ++idCounter,
+          kind: "animation",
+          selectorText: rule.selectorText,
+          source: sheetUrl + " · rule " + rulePath,
+          animationName: name,
+          duration: dur,
+          durationSec: durSec,
+          iteration: iter,
+          delay: animDelay,
+          playState: animPlayState,
+          isSpinner: false,
+          firstMatchSel: representativeSel,
+          keyframesFound: false,
+          keyframeText: "",
+          issues: [],
+          _resolveSel: representativeSel
+        };
+
+        // Look up keyframes.
+        if (keyframesByName[name]) {
+          entry.keyframesFound = true;
+          var fr = keyframesByName[name].frames;
+          // Compact keyframe summary for display.
+          entry.keyframeText = fr.map(function (f) {
+            var props = Object.keys(f.style).map(function (p) { return p + ": " + f.style[p]; }).join("; ");
+            return f.keyText + " { " + props + " }";
+          }).join("\n");
+        }
+
+        // Spinner heuristic.
+        if (firstEl) entry.isSpinner = isSpinnerLike(firstEl);
+
+        // Issues.
+        var iterTrim = (iter || "").trim().toLowerCase();
+        var isInfinite = (iterTrim === "infinite");
+        if (isInfinite) {
+          if (entry.isSpinner) {
+            entry.issues.push({
+              type: "WarnInfiniteAnimationLikelySpinner",
+              text: "Infinite animation on a likely spinner / loader (class/role/size match). WCAG 2.2.2: spinners should hide once loading is done, but typically aren't expected to have pause controls."
+            });
+          } else {
+            entry.issues.push({
+              type: "ErrInfiniteAnimation",
+              text: "animation-iteration-count: infinite on a non-spinner element. WCAG 2.2.2 requires a pause/stop/hide mechanism for animations longer than 5 seconds."
+            });
+          }
+        }
+        if (durSec > 5) {
+          entry.issues.push({
+            type: "WarnLongAnimation",
+            text: "animation-duration: " + dur + " (" + durSec + "s) exceeds 5 seconds. WCAG 2.2.2 requires user control for content that moves for more than 5 seconds."
+          });
+        }
+        // Keyframe pattern analysis (only if keyframes are available).
+        if (keyframesByName[name]) {
+          var patternTags = analyseKeyframes(keyframesByName[name].frames, durSec || 9999);
+          for (var pt = 0; pt < patternTags.length; pt++) {
+            entry.issues.push({
+              type: "WarnProblematicAnimation",
+              text: "Keyframe pattern flagged: " + patternTags[pt].text
+            });
+          }
+        }
+        results.push(entry);
+      }
+      if (hasLongTransition) {
+        var entryT = {
+          idx: ++idCounter,
+          kind: "transition",
+          selectorText: rule.selectorText,
+          source: sheetUrl + " · rule " + rulePath,
+          animationName: "(transition)",
+          duration: transitionDuration,
+          durationSec: 0,
+          iteration: "",
+          delay: "",
+          playState: "",
+          isSpinner: false,
+          firstMatchSel: representativeSel,
+          keyframesFound: false,
+          keyframeText: "",
+          issues: [{
+            type: "WarnLongAnimation",
+            text: "transition-duration: " + transitionDuration + " on " + (transitionProperty || "(all)") + " exceeds 5 seconds. Long transitions can disorient cognitive-disability users."
+          }],
+          _resolveSel: representativeSel
+        };
+        results.push(entryT);
+      }
+    }
+
+    function recordKeyframesRule(rule) {
+      var name = rule.name || (rule.cssText.match(/@(?:-\w+-)?keyframes\s+([\w-]+)/) || [])[1];
+      if (!name) return;
+      var frames = [];
+      var keyframesRules = rule.cssRules || rule.keyText;
+      try {
+        for (var i = 0; i < rule.cssRules.length; i++) {
+          var kf = rule.cssRules[i];
+          var style = {};
+          for (var pi = 0; pi < kf.style.length; pi++) {
+            var p = kf.style[pi];
+            style[p] = kf.style.getPropertyValue(p);
+          }
+          frames.push({ keyText: kf.keyText, style: style });
+        }
+      } catch (e) {}
+      keyframesByName[name] = { frames: frames };
+    }
+
+    function walkRules(rules, sheetUrl, pathPrefix, insideReducedMotion) {
+      if (!rules) return;
+      for (var i = 0; i < rules.length; i++) {
+        var rule = rules[i];
+        if (!rule) continue;
+        var rulePath = pathPrefix + i;
+        // CSSKeyframesRule
+        if (rule.constructor && rule.constructor.name === "CSSKeyframesRule") {
+          recordKeyframesRule(rule);
+        }
+        // CSSMediaRule with prefers-reduced-motion?
+        if (rule.media && rule.media.mediaText) {
+          var mt = rule.media.mediaText.toLowerCase();
+          var isReduced = /prefers-reduced-motion\s*:\s*(?:reduce|no-preference)/.test(mt);
+          if (/prefers-reduced-motion/.test(mt)) {
+            hasReducedMotionRule = true;
+          }
+          if (rule.cssRules) {
+            walkRules(rule.cssRules, sheetUrl, rulePath + "/", insideReducedMotion || isReduced);
+          }
+          continue;
+        }
+        // CSSSupportsRule, CSSLayerBlockRule, etc.
+        if (rule.cssRules && rule.cssRules.length) {
+          walkRules(rule.cssRules, sheetUrl, rulePath + "/", insideReducedMotion);
+        }
+        // CSSStyleRule
+        if (rule.selectorText && rule.style) {
+          recordAnimationRule(rule, sheetUrl, rulePath, insideReducedMotion);
+        }
+      }
+    }
+
+    function walkSheets(sheets) {
+      for (var i = 0; i < sheets.length; i++) {
+        var sheet = sheets[i];
+        totalSheets++;
+        var sheetUrl = sheet && sheet.href ? sheet.href : "(inline <style>)";
+        var rules;
+        try { rules = sheet.cssRules; } catch (e) {
+          untestableSheets++;
+          continue;
+        }
+        if (!rules) continue;
+        // First pass to find keyframes (so animations can reference them in second pass).
+        // Actually we walk linearly, but keyframes records get stored as we go and
+        // animation rules look them up at flag time.
+        walkRules(rules, sheetUrl, "", false);
+      }
+    }
+
+    walkSheets(document.styleSheets);
+    var hosts;
+    try { hosts = document.querySelectorAll("*"); } catch (e) { hosts = []; }
+    for (var hi = 0; hi < hosts.length; hi++) {
+      if (hosts[hi].shadowRoot) {
+        shadowRoots++;
+        try { walkSheets(hosts[hi].shadowRoot.styleSheets || []); } catch (e) {}
+      }
+    }
+
+    // ---- <marquee> / <blink> / animated-gif candidates ----
+    function findMarquees(root) {
+      var els;
+      try { els = root.querySelectorAll("marquee, blink"); } catch (e) { els = []; }
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var tag = el.tagName.toLowerCase();
+        results.push({
+          idx: ++idCounter,
+          kind: tag,
+          selectorText: tag,
+          source: "DOM element",
+          animationName: tag,
+          duration: "",
+          durationSec: 0,
+          iteration: "",
+          delay: "",
+          playState: "",
+          isSpinner: false,
+          firstMatchSel: uniqueSelector(el),
+          keyframesFound: false,
+          keyframeText: "",
+          issues: [{
+            type: (tag === "marquee" ? "ErrMarqueeElement" : "ErrBlinkElement"),
+            text: "<" + tag + "> is an obsolete HTML element with intrinsic continuous motion. WCAG 2.2.2 (Pause Stop Hide) and 2.3.1 (Three Flashes). Remove it and use static text, with CSS animations only inside @media (prefers-reduced-motion: no-preference) if motion is essential."
+          }],
+          _resolveSel: uniqueSelector(el)
+        });
+      }
+      // Animated GIF candidates.
+      var imgs;
+      try { imgs = root.querySelectorAll('img[src$=".gif" i], img[src*=".gif?"]'); } catch (e) { imgs = []; }
+      for (var j = 0; j < imgs.length; j++) {
+        var img = imgs[j];
+        var sel = uniqueSelector(img);
+        results.push({
+          idx: ++idCounter,
+          kind: "gif",
+          selectorText: "img",
+          source: img.getAttribute("src") || "",
+          animationName: "(GIF)",
+          duration: "",
+          durationSec: 0,
+          iteration: "",
+          delay: "",
+          playState: "",
+          isSpinner: false,
+          firstMatchSel: sel,
+          keyframesFound: false,
+          keyframeText: "",
+          issues: [{
+            type: "InfoAnimatedGifCandidate",
+            text: "<img> with a .gif src — may be animated. Can't verify animation from the URL alone (would require decoding image data). Manual review for WCAG 2.2.2 / 2.3.1."
+          }],
+          _resolveSel: sel
+        });
+      }
+      // Shadow recursion.
+      var all;
+      try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+      for (var s = 0; s < all.length; s++) {
+        if (all[s].shadowRoot) findMarquees(all[s].shadowRoot);
+      }
+    }
+    findMarquees(document);
+
+    // ---- page-level: no reduced-motion support ----
+    var animationCount = results.filter(function (r) { return r.kind === "animation"; }).length;
+    if (animationCount > 0 && !hasReducedMotionRule) {
+      pageIssues.push({
+        type: "ErrNoReducedMotionSupport",
+        text: animationCount + " CSS animation(s) found on the page but no @media (prefers-reduced-motion: reduce) rule anywhere. Users with vestibular disorders cannot opt out of motion. WCAG 2.3.3 (Animation from Interactions, AAA) and 2.2.2."
+      });
+    }
+
+    return {
+      url: url,
+      isTop: isTop,
+      results: results,
+      pageIssues: pageIssues,
+      hasReducedMotionRule: hasReducedMotionRule,
+      animationCount: animationCount,
+      totalSheets: totalSheets,
+      untestableSheets: untestableSheets,
+      totalRules: totalRules,
+      shadowRoots: shadowRoots
+    };
+  } catch (e) {
+    return {
+      url: location.href,
+      isTop: true,
+      results: [],
+      pageIssues: [],
+      error: (e && e.message ? e.message : String(e))
+    };
+  }
+}
+
+function displayAnimation(framesData, checkId) {
+  "use strict";
+  try {
+    var P = "__a11yn_ext_";
+    if (window[P + "cleanup"]) {
+      try { window[P + "cleanup"](); } catch (e) {}
+    }
+
+    var allResults = [];
+    var pageIssues = [];
+    var totalSheets = 0, untestableSheets = 0, totalRules = 0, totalShadow = 0;
+    var anyError = null;
+    var anyReducedMotion = false;
+    var totalAnimations = 0;
+
+    for (var fi = 0; fi < framesData.length; fi++) {
+      var fd = framesData[fi];
+      if (!fd) continue;
+      if (fd.error) { anyError = fd.error; continue; }
+      totalSheets += (fd.totalSheets || 0);
+      untestableSheets += (fd.untestableSheets || 0);
+      totalRules += (fd.totalRules || 0);
+      totalShadow += (fd.shadowRoots || 0);
+      totalAnimations += (fd.animationCount || 0);
+      if (fd.hasReducedMotionRule) anyReducedMotion = true;
+      if (fd.pageIssues) fd.pageIssues.forEach(function (p) { pageIssues.push(p); });
+      if (!fd.results) continue;
+      for (var ri = 0; ri < fd.results.length; ri++) {
+        var r = fd.results[ri];
+        r._frameId = fd.frameId;
+        r._frameUrl = fd.url;
+        r._frameIsTop = !!fd.isTop;
+        allResults.push(r);
+      }
+    }
+
+    for (var ai = 0; ai < allResults.length; ai++) {
+      var d = allResults[ai];
+      if (d._frameIsTop && d._resolveSel) {
+        try { d._resolveEl = document.querySelector(d._resolveSel); } catch (e) {}
+      }
+    }
+
+    var infiniteErr = 0, infiniteSpinner = 0, longAnim = 0, problematic = 0,
+        marquee = 0, blink = 0, gif = 0, withIssues = 0, ok = 0;
+    for (var ci = 0; ci < allResults.length; ci++) {
+      var c = allResults[ci];
+      if (c.kind === "marquee") marquee++;
+      else if (c.kind === "blink") blink++;
+      else if (c.kind === "gif") gif++;
+      if (c.issues && c.issues.length) {
+        withIssues++;
+        c.issues.forEach(function (i) {
+          if (i.type === "ErrInfiniteAnimation") infiniteErr++;
+          else if (i.type === "WarnInfiniteAnimationLikelySpinner") infiniteSpinner++;
+          else if (i.type === "WarnLongAnimation") longAnim++;
+          else if (i.type === "WarnProblematicAnimation") problematic++;
+        });
+      } else {
+        ok++;
+      }
+    }
+
+    var host = document.createElement("div");
+    host.id = P + "host";
+    host.style.setProperty("all", "initial", "important");
+    document.documentElement.appendChild(host);
+    var shadow = host.attachShadow({ mode: "closed" });
+
+    var style = document.createElement("style");
+    style.textContent =
+      ':host { all: initial !important; }' +
+      '* { box-sizing: border-box; font-family: ui-sans-serif, system-ui, sans-serif !important; }' +
+      '.panel { position: fixed; top: 16px; right: 16px; width: 540px; max-height: 80vh; overflow: auto; background: #ffffff; color: #202020; border: 2px solid #003876; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 2147483647; font-size: 16px; line-height: 1.4; }' +
+      'header { background: #003876; color: #fff; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }' +
+      'header strong { flex: 1; font-size: 16px; }' +
+      'header button { font: inherit; font-size: 14px; border: 1px solid #fff; background: transparent; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; }' +
+      'header button:hover { background: rgba(255,255,255,0.15); }' +
+      '.summary { padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 15px; }' +
+      '.pageinfo { padding: 10px 12px; border-bottom: 1px solid #eee; background: #f4f7ff; font-size: 14px; }' +
+      '.pageinfo strong { color: #003876; }' +
+      '.pageissue { background: #fdecec; color: #7a0000; padding: 8px 12px; margin: 0; border-bottom: 1px solid #f3c7c7; font-size: 14px; font-weight: 500; }' +
+      '.filterbar { padding: 6px 12px; border-bottom: 1px solid #eee; display: flex; flex-wrap: wrap; gap: 4px; }' +
+      '.filterbar button { font: inherit; font-size: 13px; border: 1px solid #aaa; background: #f4f4f4; color: #202020; padding: 3px 8px; border-radius: 4px; cursor: pointer; }' +
+      '.filterbar button.active { background: #003876; color: #fff; border-color: #003876; }' +
+      'ul { list-style: none; margin: 0; padding: 0; }' +
+      'li.row { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 15px; }' +
+      'li.row:hover { background: #f6f9ff; }' +
+      '.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: 1px; }' +
+      '.chip.idx { background: #003876; color: #fff; }' +
+      '.chip.fail { background: #b00020; color: #fff; }' +
+      '.chip.warn { background: #d97706; color: #fff; }' +
+      '.chip.ok { background: #1a7f1a; color: #fff; }' +
+      '.chip.info { background: #555; color: #fff; font-weight: 500; }' +
+      '.chip.kind { background: #003876; color: #fff; }' +
+      '.selector { font-family: ui-monospace, monospace !important; font-size: 13px; color: #003876; font-weight: 600; margin-top: 6px; word-break: break-all; }' +
+      '.meta { color: #555; font-size: 13px; margin-top: 4px; }' +
+      '.source { font-family: ui-monospace, monospace !important; font-size: 12px; color: #555; word-break: break-all; }' +
+      '.keyframes { font-family: ui-monospace, monospace !important; font-size: 12px; background: #f4f7ff; padding: 6px 8px; border-radius: 4px; color: #303030; margin-top: 4px; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto; }' +
+      '.issues { margin-top: 6px; }' +
+      '.issue { display: block; background: #fdecec; color: #7a0000; padding: 4px 8px; border-radius: 4px; font-size: 13px; margin-top: 2px; }' +
+      '.issue.warn { background: #fff5e1; color: #7a4a00; }' +
+      '.issue.info { background: #f0f0f5; color: #303030; }' +
+      '.panel.filter-issues li.row:not(.has-issue) { display: none; }' +
+      '.panel.filter-infinite li.row:not(.is-infinite) { display: none; }' +
+      '.panel.filter-long li.row:not(.is-long) { display: none; }' +
+      '.panel.filter-problematic li.row:not(.is-problematic) { display: none; }' +
+      '.panel.filter-marquee li.row:not(.is-marquee) { display: none; }' +
+      '.panel.filter-gif li.row:not(.is-gif) { display: none; }' +
+      'footer { padding: 8px 12px; font-size: 12px; color: #666; border-top: 1px solid #ddd; }';
+    shadow.appendChild(style);
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+      });
+    }
+
+    var panelEl = document.createElement("div");
+    panelEl.className = "panel";
+
+    var html = "";
+    html += '<header><strong>Animation (' + allResults.length + ')</strong>' +
+            '<button id="' + P + 'copy">Copy MD</button>' +
+            '<button id="' + P + 'close">Close</button></header>';
+
+    var summaryBits = [
+      totalAnimations + " CSS animation" + (totalAnimations === 1 ? "" : "s"),
+      marquee ? (marquee + " <marquee>") : null,
+      blink ? (blink + " <blink>") : null,
+      gif ? (gif + " GIF") : null,
+      totalSheets + " sheet" + (totalSheets === 1 ? "" : "s"),
+      withIssues + " with issues"
+    ].filter(Boolean);
+    html += '<div class="summary">' + esc(summaryBits.join(" · ")) +
+            (totalShadow ? ' · ' + totalShadow + ' shadow root(s)' : '') +
+            (anyError ? ' · <span style="color:#b00020">error: ' + esc(anyError) + '</span>' : '') +
+            '</div>';
+
+    html += '<div class="pageinfo">';
+    html += '<div><strong>prefers-reduced-motion:</strong> ' + (anyReducedMotion ? '<span style="color:#1a5a1a;">✓ rule found</span>' : '<span style="color:#7a0000;">✗ no media rule on the page</span>') + '</div>';
+    html += '</div>';
+
+    for (var pi = 0; pi < pageIssues.length; pi++) {
+      html += '<div class="pageissue"><strong>' + esc(pageIssues[pi].type) + '</strong>: ' + esc(pageIssues[pi].text) + '</div>';
+    }
+    if (untestableSheets > 0) {
+      html += '<div class="pageissue" style="background:#fff5e1; color:#7a4a00; border-color:#e6c7a0;">' +
+              esc(untestableSheets + " cross-origin stylesheet" + (untestableSheets === 1 ? "" : "s") +
+              " couldn't be read due to CORS — their animation rules can't be inspected.") + '</div>';
+    }
+
+    html += '<div class="filterbar">' +
+            '<button data-filter="all" class="active">All (' + allResults.length + ')</button>' +
+            '<button data-filter="issues">Issues (' + withIssues + ')</button>' +
+            '<button data-filter="infinite">Infinite (' + (infiniteErr + infiniteSpinner) + ')</button>' +
+            '<button data-filter="long">Long (' + longAnim + ')</button>' +
+            '<button data-filter="problematic">Problematic (' + problematic + ')</button>' +
+            '<button data-filter="marquee">&lt;marquee&gt;/&lt;blink&gt; (' + (marquee + blink) + ')</button>' +
+            '<button data-filter="gif">GIFs (' + gif + ')</button>' +
+            '</div>';
+
+    html += '<ul>';
+    for (var ix = 0; ix < allResults.length; ix++) {
+      var t = allResults[ix];
+      var classes = ["row"];
+      if (t.issues && t.issues.length) classes.push("has-issue");
+      t.issues.forEach(function (i) {
+        if (i.type === "ErrInfiniteAnimation" || i.type === "WarnInfiniteAnimationLikelySpinner") classes.push("is-infinite");
+        if (i.type === "WarnLongAnimation") classes.push("is-long");
+        if (i.type === "WarnProblematicAnimation") classes.push("is-problematic");
+      });
+      if (t.kind === "marquee" || t.kind === "blink") classes.push("is-marquee");
+      if (t.kind === "gif") classes.push("is-gif");
+
+      html += '<li class="' + classes.join(" ") + '">';
+      html += '<span class="chip idx">#' + t.idx + '</span>';
+
+      var kindLabel = t.kind === "animation" ? "CSS animation" :
+                       t.kind === "transition" ? "CSS transition" :
+                       t.kind === "marquee" ? "&lt;marquee&gt;" :
+                       t.kind === "blink" ? "&lt;blink&gt;" :
+                       t.kind === "gif" ? "GIF" : t.kind;
+      html += '<span class="chip kind">' + kindLabel + '</span>';
+
+      if (t.isSpinner) html += '<span class="chip info">SPINNER-LIKE</span>';
+
+      var attrChips = [];
+      if (t.iteration && t.iteration !== "1") attrChips.push("iter=" + t.iteration);
+      if (t.duration) attrChips.push("dur=" + t.duration);
+      if (t.delay && t.delay !== "0s") attrChips.push("delay=" + t.delay);
+      if (t.playState && t.playState !== "running") attrChips.push("state=" + t.playState);
+      for (var aci = 0; aci < attrChips.length; aci++) {
+        html += '<span class="chip info">' + esc(attrChips[aci]) + '</span>';
+      }
+
+      if (t.animationName && t.animationName !== "(GIF)" && t.animationName !== "(transition)" && t.kind === "animation") {
+        html += '<span style="font-family: ui-monospace, monospace; font-size: 13px; color:#003876; font-weight:600;">@keyframes ' + esc(t.animationName) + '</span>';
+        if (!t.keyframesFound) html += '<span class="chip warn" style="margin-left:6px;">keyframes not found</span>';
+      }
+      if (t.kind === "gif") {
+        html += '<div class="source">src: ' + esc((t.source || "").length > 120 ? t.source.slice(0, 120) + "…" : t.source) + '</div>';
+      }
+      if (t.selectorText) html += '<div class="selector">' + esc(t.selectorText) + '</div>';
+      if (t.kind === "animation" || t.kind === "transition") {
+        html += '<div class="source">source: ' + esc(t.source) + '</div>';
+      }
+      if (t.keyframeText) {
+        html += '<details><summary style="cursor:pointer; font-size:13px; color:#555; margin-top:4px;">@keyframes body</summary><div class="keyframes">' + esc(t.keyframeText) + '</div></details>';
+      }
+
+      if (t.issues && t.issues.length) {
+        html += '<div class="issues">';
+        for (var ji = 0; ji < t.issues.length; ji++) {
+          var ic = "issue";
+          if (/^Warn/.test(t.issues[ji].type)) ic = "issue warn";
+          else if (/^Info/.test(t.issues[ji].type)) ic = "issue info";
+          html += '<span class="' + ic + '"><strong>' + esc(t.issues[ji].type) + '</strong>: ' + esc(t.issues[ji].text) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</li>';
+    }
+    html += '</ul>';
+    html += '<footer>WCAG 2.2.2 Pause Stop Hide · 2.3.1 Three Flashes · 2.3.3 Animation from Interactions. Limitations: JS-driven animations (setInterval / setTimeout / requestAnimationFrame) are invisible to static inspection; carousel/slider detection isn\'t included (too heuristic); we can\'t confirm whether a .gif is actually animated without decoding image data. Rule prefixes follow auto_a11y conventions.</footer>';
+    panelEl.innerHTML = html;
+    shadow.appendChild(panelEl);
+
+    panelEl.querySelectorAll("li.row").forEach(function (li, i) {
+      li.style.cursor = "pointer";
+      li.addEventListener("click", function (e) {
+        if (e.target.closest && e.target.closest("button")) return;
+        if (e.target.tagName === "SUMMARY" || (e.target.closest && e.target.closest("details"))) return;
+        var r = allResults[i];
+        if (r && r._resolveEl) {
+          try {
+            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
+            setTimeout(function () {
+              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
+            }, 1400);
+          } catch (er) {}
+        }
+      });
+    });
+
+    for (var oi = 0; oi < allResults.length; oi++) {
+      var o = allResults[oi];
+      if (o._resolveEl) {
+        try {
+          var color = "#003876";
+          if (o.issues && o.issues.some(function (i) { return /^Err/.test(i.type); })) color = "#b00020";
+          else if (o.issues && o.issues.length) color = "#d97706";
+          o._resolveEl.style.setProperty("outline", "2px solid " + color, "important");
+          o._resolveEl.style.setProperty("outline-offset", "2px", "important");
+        } catch (e) {}
+      }
+    }
+
+    // ---- markdown ----
+    var md = "# Animation\n\n";
+    md += "Counts: " + totalAnimations + " CSS animations, " + marquee + " <marquee>, " + blink + " <blink>, " + gif + " GIF.\n";
+    md += "Reduced-motion media rule: " + (anyReducedMotion ? "yes" : "**no**") + ".\n\n";
+    if (pageIssues.length) {
+      md += "**Page issues:**\n";
+      for (var pm = 0; pm < pageIssues.length; pm++) md += "- **" + pageIssues[pm].type + "** — " + pageIssues[pm].text + "\n";
+      md += "\n";
+    }
+    md += "| # | Kind | Name | Dur | Iter | Spinner | Selector | Issues |\n";
+    md += "|---|------|------|-----|------|---------|----------|--------|\n";
+    for (var mi = 0; mi < allResults.length; mi++) {
+      var mt = allResults[mi];
+      var issueStr = mt.issues && mt.issues.length ? mt.issues.map(function (z) { return z.type; }).join("; ") : "";
+      md += "| " + mt.idx +
+            " | " + mt.kind +
+            " | " + (mt.animationName || "").replace(/\|/g, "\\|") +
+            " | " + (mt.duration || "") +
+            " | " + (mt.iteration || "") +
+            " | " + (mt.isSpinner ? "yes" : "") +
+            " | `" + (mt.selectorText || "").replace(/\|/g, "\\|") + "`" +
+            " | " + issueStr + " |\n";
+    }
+
+    panelEl.querySelectorAll(".filterbar button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var filter = btn.dataset.filter;
+        panelEl.className = "panel filter-" + filter;
+        panelEl.querySelectorAll(".filterbar button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+      });
+    });
+
+    (function () {
+      var header = panelEl.querySelector("header");
+      if (!header) return;
+      header.style.cursor = "move";
+      header.style.userSelect = "none";
+      header.style.touchAction = "none";
+      var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      header.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        var rect = panelEl.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        dragging = true;
+        panelEl.style.left = startLeft + "px";
+        panelEl.style.top = startTop + "px";
+        panelEl.style.right = "auto";
+        try { header.setPointerCapture(e.pointerId); } catch (ee) {}
+        e.preventDefault();
+      });
+      header.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        var dx = e.clientX - startX, dy = e.clientY - startY;
+        panelEl.style.left = (startLeft + dx) + "px";
+        panelEl.style.top = (startTop + dy) + "px";
+      });
+      header.addEventListener("pointerup", function (e) {
+        dragging = false;
+        try { header.releasePointerCapture(e.pointerId); } catch (ee) {}
+      });
+      header.addEventListener("pointercancel", function () { dragging = false; });
+    })();
+
+    panelEl.querySelector("#" + P + "close").addEventListener("click", function () { window[P + "cleanup"](); });
+    panelEl.querySelector("#" + P + "copy").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      var done = function (ok) { btn.textContent = ok ? "Copied!" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy MD"; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(function () { done(true); }, function () { done(false); });
+      } else {
+        var ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(true); } catch (err) { done(false); } ta.remove();
+      }
+    });
+
+    window[P + "active"] = checkId;
+    window[P + "cleanup"] = function () {
+      try { host.remove(); } catch (e) {}
+      allResults.forEach(function (r) {
+        if (r._resolveEl) {
+          try {
+            r._resolveEl.style.removeProperty("outline");
+            r._resolveEl.style.removeProperty("outline-offset");
+          } catch (e) {}
+        }
+      });
+      delete window[P + "cleanup"];
+      delete window[P + "active"];
+      console.log("%c[a11yn] cleared.", "color:#003876");
+    };
+  } catch (e) {
+    try {
+      var Pe = "__a11yn_ext_";
+      var hostE = document.createElement("div");
+      hostE.id = Pe + "host";
+      hostE.style.cssText = "position:fixed;top:16px;right:16px;background:#b00020;color:#fff;padding:12px 16px;border-radius:6px;z-index:2147483647;font:14px ui-sans-serif,system-ui,sans-serif;max-width:480px;";
+      hostE.textContent = "Animation check failed: " + (e && e.message ? e.message : String(e));
       document.documentElement.appendChild(hostE);
       setTimeout(function () { try { hostE.remove(); } catch (er) {} }, 6000);
     } catch (e2) {}

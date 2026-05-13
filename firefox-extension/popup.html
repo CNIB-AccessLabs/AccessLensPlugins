@@ -127,6 +127,18 @@
       </button>
       <p class="desc">WCAG 1.4.4 Resize Text and 1.4.10 Reflow. Page-level: viewport meta presence and validity (flags user-scalable=no, maximum-scale&lt;2), overflow:hidden on &lt;html&gt;/&lt;body&gt;, current-viewport horizontal overflow. Per-element: elements with computed min-width &gt; 320px (force horizontal scrolling at the 1.4.10 minimum viewport), elements with computed fixed pixel width &gt; 400px AND no responsive max-width, elements with font-size &lt; 12px (survive 200% zoom poorly). Limitations: real 1.4.10 testing requires actual resize to 320×256; real 1.4.4 testing requires zoom to 200%. Flex/grid containers and elements with percentage/vw max-widths aren't flagged.</p>
     </li>
+    <li>
+      <button class="check" data-check="nontext">
+        <span class="label">Non-text contrast</span>
+      </button>
+      <p class="desc">WCAG 1.4.11 Non-text Contrast and 2.4.7 Focus Visible. Programmatically focuses each interactive element (preventScroll), reads computed focus styles, measures focus-indicator-vs-background contrast, then blurs. Original focus + scroll restored at end. Rule families match auto_a11y (CNIB-AccessLabs) conventions: Input* / Button* / Link* / Tabindex* / Handler*. Statuses: pass (≥3:1), focus-contrast-fail, transparent-outline (alpha &lt;0.5), gradient-bg / image-bg / parent-gradient / parent-image / z-index-floating (cannot verify), no-focus-indicator. Uses Porter-Duff source-over compositing for transparent backgrounds.</p>
+    </li>
+    <li>
+      <button class="check" data-check="animation">
+        <span class="label">Animation</span>
+      </button>
+      <p class="desc">WCAG 2.2.2 Pause Stop Hide, 2.3.1 Three Flashes, 2.3.3 Animation from Interactions. Inventories every CSS animation rule across all accessible stylesheets, matches each to its @keyframes body, and inspects for: ErrInfiniteAnimation (infinite iteration on a non-spinner), WarnInfiniteAnimationLikelySpinner (same on a spinner — class/role/size heuristic downgrades to warning), WarnLongAnimation (duration &gt; 5s, including long transition-durations), WarnProblematicAnimation (keyframes contain flash opacity / shake translate / fast rotate patterns), ErrNoReducedMotionSupport (animations exist but no @media (prefers-reduced-motion) anywhere). Also flags obsolete &lt;marquee&gt; and &lt;blink&gt; elements and animated-GIF candidates (img src=*.gif). Rule prefixes follow auto_a11y conventions. Limitations: JS-driven animations and carousels are invisible to static inspection.</p>
+    </li>
   </ul>
 </section>
 <footer>

@@ -27,7 +27,9 @@ const CHECK_LABELS = {
   skiplinks: "Skip links",
   media: "Media",
   focusvis: "Focus visible",
-  reflow: "Reflow"
+  reflow: "Reflow",
+  nontext: "Non-text contrast",
+  animation: "Animation"
 };
 
 async function getActiveTab() {
