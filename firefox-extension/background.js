@@ -63,28 +63,19 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     return false;
   }
-  if (msg.type === "flash_in_frame") {
-    // Sent by a display panel's row click when the element is in a non-top frame.
-    // We can't reach into that frame from the top-frame display, but we can
-    // executeScript into it from here and run the flash inline.
-    const tabId = (sender && sender.tab) ? sender.tab.id : null;
-    if (tabId != null && msg.frameId != null && msg.sel) {
-      api.scripting.executeScript({
-        target: { tabId, frameIds: [msg.frameId] },
-        func: (sel) => {
-          try {
-            const el = document.querySelector(sel);
-            if (!el) return;
-            el.scrollIntoView({ behavior: "smooth", block: "center" });
-            el.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(() => {
-              try { el.style.removeProperty("box-shadow"); } catch (e) {}
-            }, 1400);
-          } catch (e) {}
-        },
-        args: [msg.sel]
-      }).catch(e => console.error("[a11yn] flash-in-frame failed:", e));
-    }
+  if (msg.type === "highlight_element" || msg.type === "flash_in_frame") {
+    // Highlight an element on the page. Works for both top-frame and any
+    // cross-origin iframe via scripting.executeScript with the right frameId.
+    // The highlight remains until the next highlight is requested or until
+    // clear_highlight / closeActive is called.
+    const tabId = (sender && sender.tab) ? sender.tab.id : msg.tabId;
+    if (tabId == null || msg.sel == null) return false;
+    const frameId = msg.frameId != null ? msg.frameId : 0;
+    applyHighlight(tabId, frameId, msg.sel).catch(e => console.error("[a11yn] highlight failed:", e));
+    return false;
+  }
+  if (msg.type === "clear_highlight") {
+    clearHighlight().catch(() => {});
     return false;
   }
   if (msg.type === "close") {
@@ -97,6 +88,63 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   return false;
 });
+
+// Track the currently-highlighted element so each new click can clear the
+// previous highlight, regardless of which frame it's in.
+let _highlightState = null; // { tabId, frameId, sel }
+
+async function clearHighlight() {
+  if (!_highlightState) return;
+  const prev = _highlightState;
+  _highlightState = null;
+  try {
+    await api.scripting.executeScript({
+      target: { tabId: prev.tabId, frameIds: [prev.frameId] },
+      func: (sel) => {
+        try {
+          const el = document.querySelector(sel);
+          if (el) {
+            el.style.removeProperty("box-shadow");
+            el.style.removeProperty("outline");
+            el.style.removeProperty("outline-offset");
+          }
+        } catch (e) {}
+      },
+      args: [prev.sel]
+    });
+  } catch (e) {}
+}
+
+async function applyHighlight(tabId, frameId, sel) {
+  // Clear the previous highlight (fire-and-forget; don't block on it).
+  if (_highlightState && (
+        _highlightState.tabId !== tabId ||
+        _highlightState.frameId !== frameId ||
+        _highlightState.sel !== sel)) {
+    clearHighlight();
+  }
+  _highlightState = { tabId, frameId, sel };
+  try {
+    await api.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: (sel) => {
+        try {
+          const el = document.querySelector(sel);
+          if (!el) return;
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          // Thick yellow ring; outline added too in case box-shadow gets
+          // clipped by overflow:hidden ancestors.
+          el.style.setProperty("box-shadow", "0 0 0 10px #ffeb3b, 0 0 0 14px #b00020", "important");
+          el.style.setProperty("outline", "4px solid #ffeb3b", "important");
+          el.style.setProperty("outline-offset", "4px", "important");
+        } catch (e) {}
+      },
+      args: [sel]
+    });
+  } catch (e) {
+    console.error("[a11yn] applyHighlight failed:", e);
+  }
+}
 
 async function runAllChecks(tabId) {
   await closeActive(tabId);
@@ -171,6 +219,7 @@ async function runCheck(tabId, checkId) {
 }
 
 async function closeActive(tabId) {
+  await clearHighlight();
   try {
     await api.scripting.executeScript({
       target: { tabId, frameIds: [0] },
@@ -590,29 +639,16 @@ function displayNames(framesData, checkId) {
       '<div class="' + (r.missing ? "miss" : "name") + '">' + (r.missing && !r.name ? "⚠ NO ACCESSIBLE NAME" : (r.missing ? "⚠ Placeholder only: " + esc(r.name) : esc(r.name))) + "</div>" +
       (r.src ? '<div class="src">via ' + esc(r.src) + " &middot; " + esc(r.selector) + "</div>" : "");
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -1224,29 +1260,16 @@ function displayHeadings(framesData, checkId) {
       "</div>";
 
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -1948,29 +1971,16 @@ function displayLandmarks(framesData, checkId) {
       '<div class="body">' + bodyHtml + "</div>";
 
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -2635,29 +2645,16 @@ function displayImages(framesData, checkId) {
       "</div>";
 
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -3342,29 +3339,16 @@ function displayLinks(framesData, checkId) {
       "</div>";
 
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -4349,29 +4333,16 @@ function displayAria(framesData, checkId) {
       '<div class="src">' + esc(r.selector) + "</div>";
 
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -5269,29 +5240,16 @@ function displayContrast(framesData, checkId) {
       '<div class="src">' + esc(r.selector) + '</div>';
 
     li.addEventListener("click", function () {
+      if (!r) return;
+      var _sel = r._resolveSel || r.sel || r.selector || "";
+      var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+      if (!_sel) return;
       try {
-        if (r._resolveEl) {
-          r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        } else if (r._frameId != null && !r._frameIsTop) {
-          // Cross-frame: ask the background to flash the element inside its own frame.
-          var sel = r._resolveSel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
-          }
-          if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
         }
-        if (r.badge) {
-          r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-        }
-      } catch (e) {}
+      } catch (er) {}
     });
     list.appendChild(li);
   });
@@ -6441,28 +6399,19 @@ function displayDocument(framesData, checkId) {
 
   shadow.appendChild(panelEl);
 
-  // Wire click-to-flash on every finding row that has a selector.
+  // Wire click-to-highlight on every finding row that has a selector.
   panelEl.querySelectorAll("li[data-sel]").forEach(function (liEl) {
     liEl.style.cursor = "pointer";
     liEl.addEventListener("click", function () {
       var sel = liEl.dataset.sel;
+      if (!sel) return;
       var frameIdAttr = liEl.dataset.frameId;
-      if (frameIdAttr != null && frameIdAttr !== "") {
-        try {
-          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-            rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: parseInt(frameIdAttr, 10), sel: sel });
-          }
-        } catch (e) {}
-        return;
-      }
-      var el = null;
-      try { el = document.querySelector(sel); } catch (e) {}
-      if (!el) return;
+      var frameId = (frameIdAttr != null && frameIdAttr !== "") ? parseInt(frameIdAttr, 10) : 0;
       try {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        el.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-        setTimeout(function () { try { el.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
+        var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+        if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+          rtapi.runtime.sendMessage({ type: "highlight_element", frameId: frameId, sel: sel });
+        }
       } catch (e) {}
     });
   });
@@ -7394,29 +7343,16 @@ function displayTabindex(framesData, checkId) {
         "</div>";
 
       li.addEventListener("click", function () {
+        if (!r) return;
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
         try {
-          if (r._resolveEl) {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-          } else if (r._frameId != null && !r._frameIsTop) {
-            // Cross-frame: ask the background to flash the element inside its own frame.
-            var sel = r._resolveSel || r.selector || "";
-            if (sel) {
-              try {
-                var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-                if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                  rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-                }
-              } catch (er) {}
-            }
-            if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-          if (r.badge) {
-            r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-          }
-        } catch (e) {}
+        } catch (er) {}
       });
       list.appendChild(li);
     });
@@ -8839,29 +8775,16 @@ function displayForms(framesData, checkId) {
         '<div class="src">' + esc(r.selector) + '</div>';
 
       li.addEventListener("click", function () {
+        if (!r) return;
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
         try {
-          if (r._resolveEl) {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () { try { r._resolveEl.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-          } else if (r._frameId != null && !r._frameIsTop) {
-            // Cross-frame: ask the background to flash the element inside its own frame.
-            var sel = r._resolveSel || r.selector || "";
-            if (sel) {
-              try {
-                var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-                if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                  rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-                }
-              } catch (er) {}
-            }
-            if (r.iframeEl) r.iframeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-          if (r.badge) {
-            r.badge.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () { try { r.badge.style.removeProperty("box-shadow"); } catch (e) {} }, 1400);
-          }
-        } catch (e) {}
+        } catch (er) {}
       });
       list.appendChild(li);
     });
@@ -9772,25 +9695,15 @@ function displayTables(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -10594,25 +10507,15 @@ function displayIframes(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -11419,25 +11322,15 @@ function displayButtons(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -12315,25 +12208,15 @@ function displayLists(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -12974,25 +12857,15 @@ function displayTargetSize(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -13680,25 +13553,15 @@ function displaySkipLinks(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allRows[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -14500,25 +14363,15 @@ function displayMedia(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -15190,25 +15043,15 @@ function displayFocusVisible(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -15846,25 +15689,15 @@ function displayReflow(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -16787,25 +16620,15 @@ function displayNonTextContrast(framesData, checkId) {
         if (e.target.closest && e.target.closest("button")) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -17675,25 +17498,15 @@ function displayAnimation(framesData, checkId) {
         if (e.target.tagName === "SUMMARY" || (e.target.closest && e.target.closest("details"))) return;
         var r = allResults[i];
         if (!r) return;
-        if (r._resolveEl) {
-          try {
-            r._resolveEl.scrollIntoView({ behavior: "smooth", block: "center" });
-            r._resolveEl.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-            setTimeout(function () {
-              try { r._resolveEl.style.removeProperty("box-shadow"); } catch (er) {}
-            }, 1400);
-          } catch (er) {}
-        } else if (r._frameId != null && !r._frameIsTop) {
-          var sel = r._resolveSel || r.sel || r.selector || "";
-          if (sel) {
-            try {
-              var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-              if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-                rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: r._frameId, sel: sel });
-              }
-            } catch (er) {}
+        var _sel = r._resolveSel || r.sel || r.selector || "";
+        var _frameId = (r._frameIsTop || r._frameId == null) ? 0 : r._frameId;
+        if (!_sel) return;
+        try {
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: _frameId, sel: _sel });
           }
-        }
+        } catch (er) {}
       });
     });
 
@@ -18371,33 +18184,21 @@ function displayAllChecks(allCheckData, elapsedMs) {
     });
 
     // Click an issue row to scroll the offending element into view and flash it.
-    // Top-frame: local flash. Cross-frame: post a flash_in_frame message to the
-    // background which executeScripts into the target frame.
+    // Click an issue row to highlight the element. Routed through the
+    // background so a single state-tracker handles both top-frame and
+    // cross-frame highlights, and so the highlight persists until the next
+    // row is clicked (rather than auto-clearing on a timeout).
     panelEl.querySelectorAll(".issue.clickable").forEach(function (row) {
       row.addEventListener("click", function () {
         var sel = row.dataset.sel;
         if (!sel) return;
         var frameIdAttr = row.dataset.frameId;
-        if (frameIdAttr != null && frameIdAttr !== "") {
-          // Cross-frame — dispatch to background.
-          try {
-            var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
-            if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
-              rtapi.runtime.sendMessage({ type: "flash_in_frame", frameId: parseInt(frameIdAttr, 10), sel: sel });
-            }
-          } catch (e) {}
-          return;
-        }
-        // Top-frame — flash locally.
-        var el = null;
-        try { el = document.querySelector(sel); } catch (e) {}
-        if (!el) return;
+        var frameId = (frameIdAttr != null && frameIdAttr !== "") ? parseInt(frameIdAttr, 10) : 0;
         try {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          el.style.setProperty("box-shadow", "0 0 0 4px #ffeb3b", "important");
-          setTimeout(function () {
-            try { el.style.removeProperty("box-shadow"); } catch (e) {}
-          }, 1400);
+          var rtapi = (typeof browser !== "undefined") ? browser : (typeof chrome !== "undefined" ? chrome : null);
+          if (rtapi && rtapi.runtime && rtapi.runtime.sendMessage) {
+            rtapi.runtime.sendMessage({ type: "highlight_element", frameId: frameId, sel: sel });
+          }
         } catch (e) {}
       });
     });
